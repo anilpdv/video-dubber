@@ -125,6 +125,8 @@ func (s *CosyVoiceService) ExtractVoiceSample(inputPath, outputPath string, star
 
 // Synthesize generates audio from text using CosyVoice with voice cloning
 func (s *CosyVoiceService) Synthesize(text, outputPath string) error {
+	LogInfo("CosyVoice: mode=%s sample=%s", s.mode, s.voiceSamplePath)
+
 	if text == "" {
 		return fmt.Errorf("empty text provided")
 	}

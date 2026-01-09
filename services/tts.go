@@ -12,8 +12,8 @@ import (
 )
 
 // maxPiperWorkers is the number of concurrent Piper TTS processes
-// Local TTS can handle more parallelism than API-based services
-const maxPiperWorkers = 4
+// Keep low to avoid CPU overload (Piper is CPU-intensive)
+const maxPiperWorkers = 2
 
 // TTSService uses Piper TTS (free, local, no API key)
 type TTSService struct {
@@ -97,6 +97,8 @@ func (s *TTSService) getModelPath() string {
 
 // Synthesize generates audio from text using Piper TTS with prosody control
 func (s *TTSService) Synthesize(text, outputPath string) error {
+	LogInfo("Piper TTS: voice=%s model=%s", s.voiceModel, s.getModelPath())
+
 	if text == "" {
 		return fmt.Errorf("empty text provided")
 	}

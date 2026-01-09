@@ -164,6 +164,8 @@ func (s *TranslatorService) TranslateSubtitlesWithProgress(
 	sourceLang, targetLang string,
 	onProgress func(current, total int),
 ) (models.SubtitleList, error) {
+	LogInfo("Argos Translate: %d subtitles (%s → %s)", len(subs), sourceLang, targetLang)
+
 	if len(subs) == 0 {
 		return subs, nil
 	}
@@ -257,6 +259,8 @@ func (s *TranslatorService) translateIndividualWithProgress(
 // TranslateWithOpenAI uses GPT-4o-mini for fast, high-quality translation
 // Cost: ~$0.50 for 5 hours of subtitles
 func (s *TranslatorService) TranslateWithOpenAI(subs models.SubtitleList, sourceLang, targetLang, apiKey string, onProgress func(current, total int)) (models.SubtitleList, error) {
+	LogInfo("OpenAI Translation: model=gpt-4o-mini %d subtitles (%s → %s)", len(subs), sourceLang, targetLang)
+
 	if apiKey == "" {
 		return nil, fmt.Errorf("OpenAI API key is required")
 	}

@@ -15,7 +15,7 @@ import (
 const (
 	deepSeekEndpoint     = "https://api.deepseek.com/v1/chat/completions"
 	deepSeekModel        = "deepseek-chat"
-	maxTranslateWorkers  = 3  // 3 parallel API calls (like KrillinAI)
+	maxTranslateWorkers  = 2  // Reduced to avoid rate limiting
 	chunkSize            = 50 // 50 subtitles per batch
 	maxTranslateRetries  = 3  // retry failed batches
 )
@@ -64,6 +64,8 @@ func (s *DeepSeekService) TranslateSubtitles(
 	sourceLang, targetLang string,
 	onProgress func(current, total int),
 ) (models.SubtitleList, error) {
+	LogInfo("DeepSeek: translating %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslateWorkers)
+
 	if s.apiKey == "" {
 		return nil, fmt.Errorf("DeepSeek API key is required")
 	}

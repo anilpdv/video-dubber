@@ -15,7 +15,8 @@ import (
 )
 
 // maxTTSWorkers is the number of concurrent TTS API calls
-const maxTTSWorkers = 10
+// Reduced to avoid rate limiting and excessive resource usage
+const maxTTSWorkers = 4
 
 const openAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
 
@@ -64,7 +65,7 @@ func NewOpenAITTSService(apiKey, model, voice string, speed float64) *OpenAITTSS
 		voice = "nova"
 	}
 	if speed <= 0 || speed > 4.0 {
-		speed = 1.15 // Better default for dubbing (slightly faster than 1.0)
+		speed = 1.0 // Natural speed - atempo handles timing adjustments if needed
 	}
 
 	tempDir := filepath.Join(os.TempDir(), "video-translator-openai-tts")
@@ -104,6 +105,8 @@ func (s *OpenAITTSService) SetModel(model string) {
 
 // Synthesize generates audio from text using OpenAI TTS
 func (s *OpenAITTSService) Synthesize(text, outputPath string) error {
+	LogInfo("OpenAI TTS: model=%s voice=%s speed=%.2f", s.model, s.voice, s.speed)
+
 	if text == "" {
 		return fmt.Errorf("empty text provided")
 	}

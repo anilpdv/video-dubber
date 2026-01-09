@@ -77,6 +77,8 @@ func (s *EdgeTTSService) SetVoice(voice string) {
 
 // Synthesize generates audio from text using Edge TTS
 func (s *EdgeTTSService) Synthesize(text, outputPath string) error {
+	LogInfo("Edge TTS: voice=%s", s.voice)
+
 	if text == "" {
 		return fmt.Errorf("empty text provided")
 	}
@@ -230,8 +232,8 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 		}
 	}
 
-	// Process TTS jobs in parallel (3 workers like KrillinAI to reduce network pressure)
-	const maxConcurrency = 3
+	// Process TTS jobs in parallel (reduced to avoid CPU overload)
+	const maxConcurrency = 2
 	speechPaths := make(map[int]string)
 	var speechMutex sync.Mutex
 	var progressCount int

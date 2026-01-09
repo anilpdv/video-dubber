@@ -56,6 +56,8 @@ func (s *FFmpegService) GetPath() string {
 
 // ExtractAudio extracts audio from video and converts to WAV format (16kHz mono for Whisper)
 func (s *FFmpegService) ExtractAudio(videoPath, outputPath string) error {
+	LogInfo("FFmpeg: extracting audio → %s", filepath.Base(outputPath))
+
 	// Ensure output directory exists
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
@@ -107,6 +109,8 @@ func (s *FFmpegService) ExtractAudioMP3(videoPath, outputPath string) error {
 
 // MuxVideoAudio combines video (with original audio removed) and new audio
 func (s *FFmpegService) MuxVideoAudio(videoPath, audioPath, outputPath string) error {
+	LogInfo("FFmpeg: muxing video + audio → %s", filepath.Base(outputPath))
+
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
@@ -192,6 +196,8 @@ func (s *FFmpegService) GetVideoDuration(videoPath string) (float64, error) {
 
 // ConcatAudioFiles concatenates multiple audio files into one
 func (s *FFmpegService) ConcatAudioFiles(inputPaths []string, outputPath string) error {
+	LogDebug("FFmpeg: concatenating %d audio files", len(inputPaths))
+
 	if len(inputPaths) == 0 {
 		return fmt.Errorf("no input files provided")
 	}
@@ -257,10 +263,22 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 		return os.WriteFile(outputPath, input, 0644)
 	}
 
-	// Calculate tempo factor
+	// CRITICAL FIX: Only speed up audio that's TOO LONG for the subtitle window
+	// Never slow down audio that's shorter - this causes the "slow motion" effect
+	if actualDuration <= targetDuration {
+		// Audio fits within window - just copy without slowing down
+		LogDebug("Audio %.2fs fits in %.2fs window - no adjustment needed", actualDuration, targetDuration)
+		input, err := os.ReadFile(inputPath)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(outputPath, input, 0644)
+	}
+
+	// Audio is too long - calculate tempo factor to speed it up
 	// tempo > 1.0 = speed up (shorter duration)
-	// tempo < 1.0 = slow down (longer duration)
 	tempoFactor := actualDuration / targetDuration
+	LogDebug("Audio %.2fs > %.2fs window - speeding up by %.2fx", actualDuration, targetDuration, tempoFactor)
 
 	// atempo filter only accepts 0.5-2.0 range
 	// For values outside this range, we need to chain multiple atempo filters

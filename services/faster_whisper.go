@@ -82,6 +82,8 @@ func (s *FasterWhisperService) TranscribeWithProgress(
 	audioDuration float64,
 	onProgress func(currentSec float64, percent int),
 ) (models.SubtitleList, error) {
+	LogInfo("FasterWhisper: model=%s device=%s lang=%s file=%s", s.model, s.device, language, filepath.Base(audioPath))
+
 	if err := s.CheckInstalled(); err != nil {
 		return nil, err
 	}

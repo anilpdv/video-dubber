@@ -82,6 +82,8 @@ func (s *WhisperService) CheckModel() error {
 
 // Transcribe converts audio to text with timestamps
 func (s *WhisperService) Transcribe(audioPath, language string) (models.SubtitleList, error) {
+	LogInfo("Whisper: model=%s lang=%s file=%s", filepath.Base(s.modelPath), language, filepath.Base(audioPath))
+
 	if err := s.CheckInstalled(); err != nil {
 		return nil, err
 	}
@@ -197,6 +199,8 @@ func (s *WhisperService) TranscribeWithProgress(audioPath, language string, audi
 // TranscribeWithOpenAI uses OpenAI's Whisper API for fast transcription
 // Cost: $0.006/minute = ~$1.80 for 5 hours of audio
 func (s *WhisperService) TranscribeWithOpenAI(audioPath, apiKey, language string, onProgress func(percent int, message string)) (models.SubtitleList, error) {
+	LogInfo("OpenAI Whisper API: model=whisper-1 lang=%s file=%s", language, filepath.Base(audioPath))
+
 	if apiKey == "" {
 		return nil, fmt.Errorf("OpenAI API key is required")
 	}

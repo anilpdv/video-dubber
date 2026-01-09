@@ -2,8 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"video-translator/models"
 	"video-translator/services"
 
@@ -45,6 +47,14 @@ func NewMainUI(w fyne.Window) *MainUI {
 	ui.progress = NewProgressPanel()
 	ui.progress.SetOutputDirectory(config.OutputDirectory) // Show output folder
 	ui.settings = NewSettingsPanel(ui.onTranslateSelected, ui.onTranslateAll)
+
+	// Set voice preview callback
+	ui.settings.SetOnPreviewVoice(func() {
+		ui.previewSelectedVoice()
+	})
+
+	// Initialize voice options based on TTS provider
+	ui.settings.SetVoiceOptions(config.TTSProvider)
 
 	// Set progress callback
 	ui.pipeline.SetProgressCallback(func(stage string, percent int, message string) {
@@ -246,50 +256,6 @@ func (ui *MainUI) showSettings() {
 
 	voiceSampleRow := container.NewBorder(nil, nil, nil, voiceSampleBrowseBtn, voiceSamplePathEntry)
 
-	// Piper voices
-	piperVoices := []string{
-		"en_US-amy-medium",
-		"en_US-ryan-medium",
-		"en_GB-alba-medium",
-		"de_DE-thorsten-medium",
-		"fr_FR-upmc-medium",
-	}
-
-	// OpenAI TTS voices
-	openaiVoices := []string{
-		"alloy",
-		"echo",
-		"fable",
-		"onyx",
-		"nova",
-		"shimmer",
-	}
-
-	// Edge TTS voices (FREE neural TTS from Microsoft)
-	edgeTTSVoices := []string{
-		"en-US-AriaNeural",
-		"en-US-GuyNeural",
-		"en-US-JennyNeural",
-		"en-GB-SoniaNeural",
-		"en-GB-RyanNeural",
-		"de-DE-KatjaNeural",
-		"fr-FR-DeniseNeural",
-		"es-ES-ElviraNeural",
-		"ru-RU-SvetlanaNeural",
-	}
-
-	// Voice selection (changes based on TTS provider)
-	voiceSelect := widget.NewSelect(piperVoices, nil)
-	if ui.config.TTSProvider == "openai" {
-		voiceSelect.Options = openaiVoices
-		voiceSelect.SetSelected(ui.config.OpenAITTSVoice)
-	} else if ui.config.TTSProvider == "edge-tts" {
-		voiceSelect.Options = edgeTTSVoices
-		voiceSelect.SetSelected(ui.config.EdgeTTSVoice)
-	} else {
-		voiceSelect.SetSelected(ui.config.DefaultVoice)
-	}
-
 	// Conditional UI containers
 	fasterWhisperSettings := container.NewVBox(
 		widget.NewLabel("FasterWhisper Model:"),
@@ -326,27 +292,19 @@ func (ui *MainUI) showSettings() {
 		cosyVoiceSettings.Show()
 	}
 
-	// Update voice options and show/hide settings when TTS provider changes
+	// Update main bar voice options and show/hide settings when TTS provider changes
 	ttsSelect.OnChanged = func(value string) {
 		openaiTTSSettings.Hide()
 		cosyVoiceSettings.Hide()
 
+		// Update the main bar voice dropdown
+		ui.settings.SetVoiceOptions(value)
+
 		if value == "openai" {
-			voiceSelect.Options = openaiVoices
-			voiceSelect.SetSelected("nova")
 			openaiTTSSettings.Show()
-		} else if value == "edge-tts" {
-			voiceSelect.Options = edgeTTSVoices
-			voiceSelect.SetSelected("en-US-AriaNeural")
 		} else if value == "cosyvoice" {
-			voiceSelect.Options = []string{"(uses voice sample)"}
-			voiceSelect.SetSelected("(uses voice sample)")
 			cosyVoiceSettings.Show()
-		} else {
-			voiceSelect.Options = piperVoices
-			voiceSelect.SetSelected("en_US-amy-medium")
 		}
-		voiceSelect.Refresh()
 	}
 
 	// Show/hide FasterWhisper settings based on transcription provider
@@ -371,14 +329,13 @@ func (ui *MainUI) showSettings() {
 	costInfo := widget.NewLabel("Cost varies by provider selection")
 	costInfo.TextStyle = fyne.TextStyle{Italic: true}
 
-	// Build form
+	// Build form (voice is in main bar, not here)
 	form := widget.NewForm(
 		widget.NewFormItem("Output Directory", outputDirEntry),
 		widget.NewFormItem("", widget.NewSeparator()),
 		widget.NewFormItem("Transcription", transcriptionSelect),
 		widget.NewFormItem("Translation", translationSelect),
 		widget.NewFormItem("TTS", ttsSelect),
-		widget.NewFormItem("Voice", voiceSelect),
 		widget.NewFormItem("", widget.NewSeparator()),
 		widget.NewFormItem("OpenAI API Key", openAIKeyEntry),
 		widget.NewFormItem("DeepSeek API Key", deepSeekKeyEntry),
@@ -425,13 +382,14 @@ func (ui *MainUI) showSettings() {
 			ui.config.CosyVoiceAPIURL = cosyVoiceAPIURLEntry.Text
 			ui.config.VoiceCloneSamplePath = voiceSamplePathEntry.Text
 
-			// Save voice based on TTS provider
+			// Save voice from main bar based on TTS provider
+			selectedVoice := ui.settings.GetVoice()
 			if ttsSelect.Selected == "openai" {
-				ui.config.OpenAITTSVoice = voiceSelect.Selected
+				ui.config.OpenAITTSVoice = selectedVoice
 			} else if ttsSelect.Selected == "edge-tts" {
-				ui.config.EdgeTTSVoice = voiceSelect.Selected
+				ui.config.EdgeTTSVoice = selectedVoice
 			} else if ttsSelect.Selected != "cosyvoice" {
-				ui.config.DefaultVoice = voiceSelect.Selected
+				ui.config.DefaultVoice = selectedVoice
 			}
 
 			// Save API keys
@@ -588,23 +546,36 @@ func (ui *MainUI) onTranslateSelected() {
 }
 
 func (ui *MainUI) onTranslateAll() {
-	pendingJobs := 0
+	// Collect pending jobs first
+	var pendingJobs []*models.TranslationJob
 	for _, job := range ui.jobs {
 		if job.Status == models.StatusPending {
-			pendingJobs++
+			pendingJobs = append(pendingJobs, job)
 		}
 	}
 
-	if pendingJobs == 0 {
+	if len(pendingJobs) == 0 {
 		dialog.ShowInformation("No Files", "No pending files to translate.", ui.window)
 		return
 	}
 
-	for _, job := range ui.jobs {
-		if job.Status == models.StatusPending {
-			ui.translateJob(job)
+	// Process jobs SEQUENTIALLY in background (one at a time to avoid CPU overload)
+	go func() {
+		for i, job := range pendingJobs {
+			// Update UI to show which job is processing
+			fyne.Do(func() {
+				ui.progress.SetStatus(fmt.Sprintf("Processing %d of %d videos...", i+1, len(pendingJobs)))
+			})
+
+			ui.translateJobSync(job)
 		}
-	}
+
+		// All jobs done
+		fyne.Do(func() {
+			ui.progress.SetStatus("")
+			dialog.ShowInformation("Complete", fmt.Sprintf("All %d videos translated!", len(pendingJobs)), ui.window)
+		})
+	}()
 }
 
 func (ui *MainUI) translateJob(job *models.TranslationJob) {
@@ -649,6 +620,43 @@ func (ui *MainUI) translateJob(job *models.TranslationJob) {
 	}()
 }
 
+// translateJobSync processes a job synchronously (for sequential batch processing)
+func (ui *MainUI) translateJobSync(job *models.TranslationJob) {
+	// Update job settings from current UI state
+	fyne.Do(func() {
+		job.SourceLang = ui.settings.GetSourceLang()
+		job.TargetLang = ui.settings.GetTargetLang()
+		job.Voice = ui.settings.GetVoice()
+	})
+
+	// Validate before starting
+	if err := ui.pipeline.ValidateJob(job); err != nil {
+		fyne.Do(func() {
+			dialog.ShowError(err, ui.window)
+		})
+		return
+	}
+
+	fyne.Do(func() {
+		job.Status = models.StatusProcessing
+		ui.fileList.Refresh()
+		ui.progress.SetCurrentJob(job)
+	})
+
+	// Process synchronously (wait for completion)
+	err := ui.pipeline.Process(job)
+
+	// Update UI on completion
+	fyne.Do(func() {
+		ui.fileList.Refresh()
+		ui.progress.Update()
+
+		if err != nil {
+			dialog.ShowError(err, ui.window)
+		}
+	})
+}
+
 // GetWindow returns the main window for dialogs
 func (ui *MainUI) GetWindow() fyne.Window {
 	return ui.window
@@ -657,4 +665,109 @@ func (ui *MainUI) GetWindow() fyne.Window {
 // Spacer helper
 func spacer() fyne.CanvasObject {
 	return layout.NewSpacer()
+}
+
+// previewSelectedVoice generates and plays a sample audio using the selected voice
+func (ui *MainUI) previewSelectedVoice() {
+	voice := ui.settings.GetVoice()
+	provider := ui.settings.GetTTSProvider() // Use current selection, not saved config
+	sampleText := "This is a preview of the selected voice."
+
+	// Log what's being used
+	services.LogInfo("Preview: provider=%s voice=%s", provider, voice)
+
+	// Show loading status with provider and voice name
+	ui.progress.SetStatus(fmt.Sprintf("Generating: %s (%s)", voice, provider))
+
+	go func() {
+		// Use app's cache directory for reliable temp file
+		homeDir, _ := os.UserHomeDir()
+		tempDir := filepath.Join(homeDir, ".cache", "video-translator")
+		os.MkdirAll(tempDir, 0755)
+		tempPath := filepath.Join(tempDir, "voice_preview.wav")
+
+		var err error
+
+		switch provider {
+		case "piper":
+			svc := services.NewTTSService(voice)
+			err = svc.Synthesize(sampleText, tempPath)
+		case "openai":
+			svc := services.NewOpenAITTSService(ui.config.OpenAIKey, ui.config.OpenAITTSModel, voice, ui.config.OpenAITTSSpeed)
+			err = svc.Synthesize(sampleText, tempPath)
+		case "edge-tts":
+			svc := services.NewEdgeTTSService(voice)
+			err = svc.Synthesize(sampleText, tempPath)
+		case "cosyvoice":
+			if ui.config.VoiceCloneSamplePath == "" {
+				fyne.Do(func() {
+					dialog.ShowError(fmt.Errorf("CosyVoice requires a voice sample. Configure it in Settings"), ui.window)
+					ui.progress.SetStatus("")
+				})
+				return
+			}
+			svc := services.NewCosyVoiceService(
+				ui.config.CosyVoicePath,
+				ui.config.CosyVoiceMode,
+				ui.config.CosyVoiceAPIURL,
+				ui.config.VoiceCloneSamplePath,
+				ui.config.PythonPath,
+			)
+			err = svc.Synthesize(sampleText, tempPath)
+		default:
+			err = fmt.Errorf("unknown TTS provider: %s", provider)
+		}
+
+		// Check for TTS errors
+		if err != nil {
+			fyne.Do(func() {
+				dialog.ShowError(fmt.Errorf("TTS failed: %w", err), ui.window)
+				ui.progress.SetStatus("")
+			})
+			return
+		}
+
+		// Verify file was created
+		if _, statErr := os.Stat(tempPath); os.IsNotExist(statErr) {
+			fyne.Do(func() {
+				dialog.ShowError(fmt.Errorf("audio file was not created"), ui.window)
+				ui.progress.SetStatus("")
+			})
+			return
+		}
+
+		// Update status and play audio
+		fyne.Do(func() {
+			ui.progress.SetStatus(fmt.Sprintf("Playing: %s (%s)", voice, provider))
+		})
+
+		// Play audio synchronously (wait for it to finish)
+		playErr := playAudio(tempPath)
+
+		fyne.Do(func() {
+			if playErr != nil {
+				dialog.ShowError(fmt.Errorf("playback failed: %w", playErr), ui.window)
+			}
+			ui.progress.SetStatus("")
+		})
+	}()
+}
+
+// playAudio plays an audio file and waits for it to complete
+func playAudio(path string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("afplay", path)
+	case "linux":
+		cmd = exec.Command("paplay", path)
+	case "windows":
+		cmd = exec.Command("powershell", "-c", fmt.Sprintf("(New-Object Media.SoundPlayer '%s').PlaySync()", path))
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+
+	// Run and wait for audio to finish playing
+	return cmd.Run()
 }
