@@ -29,6 +29,7 @@ type SettingsDialog struct {
 	voiceSamplePathEntry    *widget.Entry
 	openAIKeyEntry          *widget.Entry
 	deepSeekKeyEntry        *widget.Entry
+	groqAPIKeyEntry         *widget.Entry
 
 	// Conditional containers
 	fasterWhisperSettings *fyne.Container
@@ -86,6 +87,7 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 		"whisper-cpp",
 		"faster-whisper",
 		"openai",
+		"groq",
 	}, func(value string) {
 		d.updateConditionalUI()
 	})
@@ -190,6 +192,10 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 	d.deepSeekKeyEntry.SetPlaceHolder("sk-...")
 	d.deepSeekKeyEntry.SetText(d.config.DeepSeekKey)
 
+	d.groqAPIKeyEntry = widget.NewPasswordEntry()
+	d.groqAPIKeyEntry.SetPlaceHolder("gsk_...")
+	d.groqAPIKeyEntry.SetText(d.config.GroqAPIKey)
+
 	// Cost info
 	costInfo := widget.NewLabel(d.getCostEstimate())
 	costInfo.TextStyle = fyne.TextStyle{Italic: true}
@@ -209,6 +215,7 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 	apiKeysForm := widget.NewForm(
 		widget.NewFormItem("OpenAI API Key", d.openAIKeyEntry),
 		widget.NewFormItem("DeepSeek API Key", d.deepSeekKeyEntry),
+		widget.NewFormItem("Groq API Key", d.groqAPIKeyEntry),
 	)
 
 	// Initialize conditional visibility
@@ -277,6 +284,7 @@ func (d *SettingsDialog) saveSettings() {
 
 	d.config.OpenAIKey = d.openAIKeyEntry.Text
 	d.config.DeepSeekKey = d.deepSeekKeyEntry.Text
+	d.config.GroqAPIKey = d.groqAPIKeyEntry.Text
 
 	d.config.UseOpenAIAPIs = (d.config.TranscriptionProvider == "openai" || d.config.TranslationProvider == "openai")
 
@@ -297,6 +305,9 @@ func (d *SettingsDialog) getCostEstimate() string {
 	case "openai":
 		transcriptCostNum = 1.80
 		transcriptCost = "$1.80"
+	case "groq":
+		transcriptCostNum = 0.15
+		transcriptCost = "~$0.15 (ultra-fast)"
 	case "faster-whisper":
 		transcriptCostNum = 0
 		transcriptCost = "Free (local GPU)"

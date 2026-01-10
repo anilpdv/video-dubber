@@ -226,6 +226,10 @@ func (s *TTSService) SynthesizeWithCallback(subs models.SubtitleList, outputPath
 	if len(jobs) > 0 {
 		// Process function for worker pool
 		processJob := func(job worker.Job[piperJobData]) (string, error) {
+			// Acquire global CPU slot to prevent overload
+			AcquireCPUSlot()
+			defer ReleaseCPUSlot()
+
 			data := job.Data
 			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", data.index))
 

@@ -405,6 +405,11 @@ func (s *WhisperService) TranscribeChunksParallel(
 	// Define processing function for each chunk
 	processChunk := func(job worker.Job[ChunkInfo]) (models.SubtitleList, error) {
 		chunk := job.Data
+
+		// Acquire global transcription slot (limits CPU load across all videos)
+		AcquireTranscriptionSlot()
+		defer ReleaseTranscriptionSlot()
+
 		subs, err := s.Transcribe(chunk.Path, language)
 		if err != nil {
 			return nil, fmt.Errorf("chunk %d transcription failed: %w", chunk.Index, err)

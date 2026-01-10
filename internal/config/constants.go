@@ -38,6 +38,20 @@ const (
 	MinChunkDuration   = 30 * time.Second // Don't chunk audio shorter than this
 )
 
+// Global resource limits (across all videos)
+const (
+	// MaxConcurrentTranscriptions limits total concurrent transcription processes.
+	// This prevents CPU overload when batch processing multiple videos.
+	// Each video's chunks compete for these slots via a global semaphore.
+	MaxConcurrentTranscriptions = 7
+
+	// MaxConcurrentCPUOperations limits total concurrent CPU-intensive operations.
+	// This includes FFmpeg operations (silence generation, duration adjustment),
+	// local TTS (Piper), and local translation (Argos).
+	// With maxParallelVideos=2, 8 slots gives good parallelism without overload.
+	MaxConcurrentCPUOperations = 8
+)
+
 // Translation chunk sizes (subtitles per batch)
 const (
 	ChunkSizeArgos    = 50 // Local processing, moderate batch

@@ -21,6 +21,7 @@ type Pipeline struct {
 	// Transcription providers
 	whisper       *WhisperService
 	fasterWhisper *FasterWhisperService
+	groq          *GroqTranscriptionService
 
 	// Translation providers
 	translator *TranslatorService
@@ -56,6 +57,11 @@ func NewPipeline(config *models.Config) *Pipeline {
 			config.FasterWhisperModel,
 			config.FasterWhisperDevice,
 		)
+	}
+
+	// Initialize Groq if selected and API key available
+	if config.TranscriptionProvider == "groq" && config.GroqAPIKey != "" {
+		p.groq = NewGroqTranscriptionService(config.GroqAPIKey)
 	}
 
 	// Initialize DeepSeek if API key is provided
@@ -161,7 +167,8 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 	var err error
 
 	// Use parallel chunking for audio longer than 30 seconds (for local providers)
-	useChunking := audioDuration > config.MinChunkDuration.Seconds() && provider != "openai"
+	// Skip chunking for API providers (openai, groq) - they handle it internally
+	useChunking := audioDuration > config.MinChunkDuration.Seconds() && provider != "openai" && provider != "groq"
 
 	if useChunking && (provider == "whisper-cpp" || provider == "faster-whisper") {
 		// Split audio into chunks for parallel processing
@@ -236,6 +243,16 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 			subtitles, err = p.whisper.TranscribeWithOpenAI(
 				audioPath,
 				p.config.OpenAIKey,
+				job.SourceLang,
+				func(percent int, message string) {
+					reportProgress("Transcribing", percent, message)
+				},
+			)
+
+		case "groq":
+			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using Groq Whisper (ultra-fast)...")
+			subtitles, err = p.groq.TranscribeWithProgress(
+				audioPath,
 				job.SourceLang,
 				func(percent int, message string) {
 					reportProgress("Transcribing", percent, message)
@@ -490,6 +507,13 @@ func (p *Pipeline) ValidateJob(job *models.TranslationJob) error {
 		if p.config.OpenAIKey == "" {
 			return fmt.Errorf("OpenAI API key required for OpenAI Whisper")
 		}
+	case "groq":
+		if p.groq == nil || p.config.GroqAPIKey == "" {
+			return fmt.Errorf("Groq API key required. Get one at https://console.groq.com")
+		}
+		if err := p.groq.CheckInstalled(); err != nil {
+			return err
+		}
 	default: // whisper-cpp
 		if err := p.whisper.CheckInstalled(); err != nil {
 			return err
@@ -565,6 +589,9 @@ func (p *Pipeline) CheckDependencies() map[string]error {
 	results["whisper-model"] = p.whisper.CheckModel()
 	if p.fasterWhisper != nil {
 		results["faster-whisper"] = p.fasterWhisper.CheckInstalled()
+	}
+	if p.groq != nil {
+		results["groq"] = p.groq.CheckInstalled()
 	}
 
 	// Check translation providers

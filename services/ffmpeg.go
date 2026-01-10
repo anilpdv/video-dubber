@@ -129,6 +129,31 @@ func (s *FFmpegService) ExtractAudioMP3(videoPath, outputPath string) error {
 	return nil
 }
 
+// CompressToMP3 compresses audio to MP3 with specified bitrate (for API upload limits)
+func (s *FFmpegService) CompressToMP3(inputPath, outputPath string, bitrate int) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	args := []string{
+		"-i", inputPath,
+		"-vn",
+		"-acodec", "libmp3lame",
+		"-b:a", fmt.Sprintf("%dk", bitrate), // e.g., "64k" for 64 kbps
+		"-y",
+		outputPath,
+	}
+
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg MP3 compression failed: %w\nOutput: %s", err, string(output))
+	}
+
+	return nil
+}
+
 // MuxVideoAudio combines video (with original audio removed) and new audio
 func (s *FFmpegService) MuxVideoAudio(videoPath, audioPath, outputPath string) error {
 	logger.LogInfo("FFmpeg: muxing video + audio → %s", filepath.Base(outputPath))

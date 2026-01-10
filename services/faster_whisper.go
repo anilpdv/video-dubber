@@ -117,9 +117,15 @@ compute_type = "float16" if device == "cuda" else "int8"
 print("LOADING_MODEL", file=sys.stderr, flush=True)
 model = WhisperModel("%s", device=device, compute_type=compute_type)
 
-# Transcribe
+# Transcribe with optimized settings for speed
 print("TRANSCRIBING", file=sys.stderr, flush=True)
-segments, info = model.transcribe("%s", language="%s", beam_size=5)
+segments, info = model.transcribe(
+    "%s",
+    language="%s",
+    beam_size=1,        # Faster than beam_size=5, minimal accuracy loss
+    vad_filter=True,    # Skip silence for faster processing
+    vad_parameters={"min_silence_duration_ms": 500},
+)
 
 # Write SRT format
 def format_timestamp(seconds):
@@ -254,6 +260,11 @@ func (s *FasterWhisperService) TranscribeChunksParallel(
 	// Define processing function for each chunk
 	processChunk := func(job worker.Job[ChunkInfo]) (models.SubtitleList, error) {
 		chunk := job.Data
+
+		// Acquire global transcription slot (limits CPU load across all videos)
+		AcquireTranscriptionSlot()
+		defer ReleaseTranscriptionSlot()
+
 		subs, err := s.Transcribe(chunk.Path, language)
 		if err != nil {
 			return nil, fmt.Errorf("chunk %d transcription failed: %w", chunk.Index, err)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"video-translator/internal/config"
+	"video-translator/internal/limiter"
 	"video-translator/internal/subtitle"
 )
 
@@ -238,6 +239,9 @@ func (a *AudioAssembler) AdjustDurationsParallel(
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
+				// Acquire global CPU slot to prevent overload
+				limiter.AcquireCPUSlot()
+
 				adjustedPath := filepath.Join(a.tempDir, fmt.Sprintf("adjusted_%04d.wav", job.Index))
 				if err := a.ffmpeg.AdjustAudioDuration(job.SpeechPath, adjustedPath, job.TargetDuration.Seconds()); err == nil {
 					mu.Lock()
@@ -249,6 +253,8 @@ func (a *AudioAssembler) AdjustDurationsParallel(
 					adjustedPaths[job.Index] = job.SpeechPath
 					mu.Unlock()
 				}
+
+				limiter.ReleaseCPUSlot()
 			}
 		}()
 	}
@@ -325,12 +331,17 @@ func (a *AudioAssembler) PrepareGapsParallel(gaps []GapInfo, workers int) map[in
 		go func() {
 			defer wg.Done()
 			for gap := range jobs {
+				// Acquire global CPU slot to prevent overload
+				limiter.AcquireCPUSlot()
+
 				silencePath := filepath.Join(a.tempDir, fmt.Sprintf("silence_gap_%04d.wav", gap.Index))
 				if err := a.ffmpeg.GenerateSilence(gap.Duration.Seconds(), silencePath); err == nil {
 					mu.Lock()
 					silencePaths[gap.Index] = silencePath
 					mu.Unlock()
 				}
+
+				limiter.ReleaseCPUSlot()
 			}
 		}()
 	}

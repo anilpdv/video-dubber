@@ -36,6 +36,9 @@ type Config struct {
 	// DeepSeek API settings (10x cheaper than GPT-4o-mini)
 	DeepSeekKey string `json:"deepseek_key"`
 
+	// Groq API settings (ultra-fast transcription using LPU hardware)
+	GroqAPIKey string `json:"groq_api_key"`
+
 	// Whisper settings (for whisper-cpp)
 	WhisperModel string `json:"whisper_model"`
 
@@ -88,6 +91,9 @@ func DefaultConfig() *Config {
 
 		// DeepSeek settings
 		DeepSeekKey: "",
+
+		// Groq settings
+		GroqAPIKey: "",
 
 		// Whisper settings
 		WhisperModel: "base",
