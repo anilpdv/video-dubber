@@ -99,8 +99,20 @@ func (p *Pipeline) progress(stage string, percent int, message string) {
 	}
 }
 
-// Process runs the full translation pipeline
+// Process runs the full translation pipeline using the default progress callback
 func (p *Pipeline) Process(job *models.TranslationJob) error {
+	return p.ProcessWithCallback(job, p.onProgress)
+}
+
+// ProcessWithCallback runs the full translation pipeline with a custom progress callback
+// This allows parallel processing of multiple videos with per-job progress tracking
+func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress ProgressCallback) error {
+	// Helper to safely call progress callback
+	reportProgress := func(stage string, percent int, message string) {
+		if onProgress != nil {
+			onProgress(stage, percent, message)
+		}
+	}
 	// Generate unique ID for temp files
 	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
 	jobTempDir := filepath.Join(p.tempDir, jobID)
@@ -122,7 +134,7 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 
 	// Stage 1: Extract Audio (0-15%)
 	LogInfo("Pipeline: Stage 1/5 - Extracting audio from %s", filepath.Base(job.InputPath))
-	p.progress("Extracting", 0, "Extracting audio from video...")
+	reportProgress("Extracting", 0, "Extracting audio from video...")
 	job.SetStatus(models.StatusExtracting, "Extracting audio", 0)
 
 	audioPath := filepath.Join(jobTempDir, "audio.wav")
@@ -131,19 +143,19 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 		return fmt.Errorf("audio extraction failed: %w", err)
 	}
 	job.AudioPath = audioPath
-	p.progress("Extracting", 15, "Audio extracted")
+	reportProgress("Extracting", 15, "Audio extracted")
 
 	// Stage 2: Transcribe (15-40%)
 	provider := p.getTranscriptionProvider()
 	LogInfo("Pipeline: Stage 2/5 - Transcribing with %s (lang=%s)", provider, job.SourceLang)
-	p.progress("Transcribing", 15, "Starting transcription...")
+	reportProgress("Transcribing", 15, "Starting transcription...")
 	job.SetStatus(models.StatusTranscribing, "Transcribing audio", 15)
 
 	var subtitles models.SubtitleList
 	var err error
 	switch provider {
 	case "faster-whisper":
-		p.progress("Transcribing", 16, "Using FasterWhisper (GPU accelerated)...")
+		reportProgress("Transcribing", 16, "Using FasterWhisper (GPU accelerated)...")
 		audioDuration, _ := p.ffmpeg.GetVideoDuration(audioPath)
 		subtitles, err = p.fasterWhisper.TranscribeWithProgress(
 			audioPath,
@@ -157,23 +169,23 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 				} else {
 					msg = fmt.Sprintf("FasterWhisper: %.0f sec remaining", remaining)
 				}
-				p.progress("Transcribing", percent, msg)
+				reportProgress("Transcribing", percent, msg)
 			},
 		)
 
 	case "openai":
-		p.progress("Transcribing", 16, "Using OpenAI Whisper API...")
+		reportProgress("Transcribing", 16, "Using OpenAI Whisper API...")
 		subtitles, err = p.whisper.TranscribeWithOpenAI(
 			audioPath,
 			p.config.OpenAIKey,
 			job.SourceLang,
 			func(percent int, message string) {
-				p.progress("Transcribing", percent, message)
+				reportProgress("Transcribing", percent, message)
 			},
 		)
 
 	default: // "whisper-cpp"
-		p.progress("Transcribing", 16, "Using local Whisper...")
+		reportProgress("Transcribing", 16, "Using local Whisper...")
 		audioDuration, _ := p.ffmpeg.GetVideoDuration(audioPath)
 		subtitles, err = p.whisper.TranscribeWithProgress(
 			audioPath,
@@ -187,7 +199,7 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 				} else {
 					msg = fmt.Sprintf("Transcribing... %.0f sec remaining", remaining)
 				}
-				p.progress("Transcribing", percent, msg)
+				reportProgress("Transcribing", percent, msg)
 			},
 		)
 	}
@@ -202,18 +214,18 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 		return fmt.Errorf("no speech detected in audio")
 	}
 
-	p.progress("Transcribing", 40, fmt.Sprintf("Transcribed %d segments", len(subtitles)))
+	reportProgress("Transcribing", 40, fmt.Sprintf("Transcribed %d segments", len(subtitles)))
 
 	// Stage 3: Translate (40-60%)
 	transProvider := p.getTranslationProvider()
 	LogInfo("Pipeline: Stage 3/5 - Translating with %s (%s → %s)", transProvider, job.SourceLang, job.TargetLang)
-	p.progress("Translating", 40, "Translating text...")
+	reportProgress("Translating", 40, "Translating text...")
 	job.SetStatus(models.StatusTranslating, "Translating text", 40)
 
 	var translatedSubs models.SubtitleList
 	switch transProvider {
 	case "deepseek":
-		p.progress("Translating", 41, "Using DeepSeek (cost-effective)...")
+		reportProgress("Translating", 41, "Using DeepSeek (cost-effective)...")
 		translatedSubs, err = p.deepseek.TranslateSubtitles(
 			subtitles,
 			job.SourceLang,
@@ -221,12 +233,12 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 			func(current, total int) {
 				percent := 40 + (current*20)/total
 				msg := fmt.Sprintf("DeepSeek: %d/%d segments", current, total)
-				p.progress("Translating", percent, msg)
+				reportProgress("Translating", percent, msg)
 			},
 		)
 
 	case "openai":
-		p.progress("Translating", 41, "Using OpenAI GPT-4o-mini...")
+		reportProgress("Translating", 41, "Using OpenAI GPT-4o-mini...")
 		translatedSubs, err = p.translator.TranslateWithOpenAI(
 			subtitles,
 			job.SourceLang,
@@ -235,12 +247,12 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 			func(current, total int) {
 				percent := 40 + (current*20)/total
 				msg := fmt.Sprintf("GPT-4o-mini: %d/%d segments", current, total)
-				p.progress("Translating", percent, msg)
+				reportProgress("Translating", percent, msg)
 			},
 		)
 
 	default: // "argos"
-		p.progress("Translating", 41, "Using local Argos Translate...")
+		reportProgress("Translating", 41, "Using local Argos Translate...")
 		translatedSubs, err = p.translator.TranslateSubtitlesWithProgress(
 			subtitles,
 			job.SourceLang,
@@ -248,7 +260,7 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 			func(current, total int) {
 				percent := 40 + (current*20)/total
 				msg := fmt.Sprintf("Argos: %d/%d segments", current, total)
-				p.progress("Translating", percent, msg)
+				reportProgress("Translating", percent, msg)
 			},
 		)
 	}
@@ -257,49 +269,49 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 		job.Fail(err)
 		return fmt.Errorf("translation failed: %w", err)
 	}
-	p.progress("Translating", 60, "Translation complete")
+	reportProgress("Translating", 60, "Translation complete")
 
 	// Stage 4: Text-to-Speech (60-85%)
 	ttsProvider := p.getTTSProvider()
 	LogInfo("Pipeline: Stage 4/5 - Synthesizing with %s (voice=%s)", ttsProvider, job.Voice)
-	p.progress("Synthesizing", 60, "Generating speech...")
+	reportProgress("Synthesizing", 60, "Generating speech...")
 	job.SetStatus(models.StatusSynthesizing, "Generating dubbed audio", 60)
 
 	dubbedAudioPath := filepath.Join(jobTempDir, "dubbed.wav")
 	switch ttsProvider {
 	case "openai":
-		p.progress("Synthesizing", 61, "Using OpenAI TTS (high quality)...")
+		reportProgress("Synthesizing", 61, "Using OpenAI TTS (high quality)...")
 		if p.openaiTTS != nil {
 			p.openaiTTS.SetVoice(job.Voice)
 		}
 		err = p.openaiTTS.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
 			progress := 60 + (current*25)/total
-			p.progress("Synthesizing", progress, fmt.Sprintf("OpenAI TTS: %d/%d", current, total))
+			reportProgress("Synthesizing", progress, fmt.Sprintf("OpenAI TTS: %d/%d", current, total))
 		})
 
 	case "cosyvoice":
-		p.progress("Synthesizing", 61, "Using CosyVoice (voice cloning)...")
+		reportProgress("Synthesizing", 61, "Using CosyVoice (voice cloning)...")
 		err = p.cosyvoice.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
 			progress := 60 + (current*25)/total
-			p.progress("Synthesizing", progress, fmt.Sprintf("CosyVoice: %d/%d", current, total))
+			reportProgress("Synthesizing", progress, fmt.Sprintf("CosyVoice: %d/%d", current, total))
 		})
 
 	case "edge-tts":
-		p.progress("Synthesizing", 61, "Using Edge TTS (FREE neural)...")
+		reportProgress("Synthesizing", 61, "Using Edge TTS (FREE neural)...")
 		if p.edgeTTS != nil {
 			p.edgeTTS.SetVoice(job.Voice)
 		}
 		err = p.edgeTTS.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
 			progress := 60 + (current*25)/total
-			p.progress("Synthesizing", progress, fmt.Sprintf("Edge TTS: %d/%d", current, total))
+			reportProgress("Synthesizing", progress, fmt.Sprintf("Edge TTS: %d/%d", current, total))
 		})
 
 	default: // "piper"
-		p.progress("Synthesizing", 61, "Using Piper TTS...")
+		reportProgress("Synthesizing", 61, "Using Piper TTS...")
 		p.tts.SetVoice(job.Voice)
 		err = p.tts.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
 			progress := 60 + (current*25)/total
-			p.progress("Synthesizing", progress, fmt.Sprintf("Piper: %d/%d", current, total))
+			reportProgress("Synthesizing", progress, fmt.Sprintf("Piper: %d/%d", current, total))
 		})
 	}
 
@@ -308,11 +320,11 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 		return fmt.Errorf("speech synthesis failed: %w", err)
 	}
 	job.DubbedAudioPath = dubbedAudioPath
-	p.progress("Synthesizing", 85, "Speech synthesis complete")
+	reportProgress("Synthesizing", 85, "Speech synthesis complete")
 
 	// Stage 5: Mux Video (85-100%)
 	LogInfo("Pipeline: Stage 5/5 - Muxing final video")
-	p.progress("Muxing", 85, "Creating final video...")
+	reportProgress("Muxing", 85, "Creating final video...")
 	job.SetStatus(models.StatusMuxing, "Creating final video", 85)
 
 	// Generate output path
@@ -324,7 +336,7 @@ func (p *Pipeline) Process(job *models.TranslationJob) error {
 
 	job.Complete(outputPath)
 	LogInfo("Pipeline: Complete! Output: %s", outputPath)
-	p.progress("Complete", 100, "Translation complete!")
+	reportProgress("Complete", 100, "Translation complete!")
 
 	return nil
 }

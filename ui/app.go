@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -20,6 +22,9 @@ import (
 	appTheme "video-translator/ui/theme"
 	"video-translator/ui/widgets"
 )
+
+// maxParallelVideos limits concurrent video processing to avoid overloading the computer
+const maxParallelVideos = 2
 
 // MainUI is the main application UI
 type MainUI struct {
@@ -198,17 +203,45 @@ func (ui *MainUI) onTranslateAll() {
 		return
 	}
 
-	go func() {
-		for i, job := range pendingJobs {
-			fyne.Do(func() {
-				ui.progressPanel.SetStatus(fmt.Sprintf("Processing %d of %d videos...", i+1, len(pendingJobs)))
-			})
-			ui.translateJobSync(job)
-		}
+	totalJobs := len(pendingJobs)
 
+	// Show initial status
+	fyne.Do(func() {
+		ui.progressPanel.SetStatus(fmt.Sprintf("Starting %d videos (max %d parallel)...", totalJobs, maxParallelVideos))
+	})
+
+	// Semaphore to limit concurrent videos (prevents overloading computer)
+	sem := make(chan struct{}, maxParallelVideos)
+	var wg sync.WaitGroup
+	var completedCount int32
+
+	for _, job := range pendingJobs {
+		wg.Add(1)
+		go func(j *models.TranslationJob) {
+			defer wg.Done()
+
+			// Acquire semaphore (blocks if maxParallelVideos already running)
+			sem <- struct{}{}
+			defer func() { <-sem }() // Release semaphore when done
+
+			// Process this video
+			ui.translateJobSync(j)
+
+			// Update completion count
+			count := atomic.AddInt32(&completedCount, 1)
+			fyne.Do(func() {
+				ui.progressPanel.SetStatus(fmt.Sprintf("Completed %d of %d videos...", count, totalJobs))
+				ui.fileListPanel.Refresh()
+			})
+		}(job)
+	}
+
+	// Wait for all jobs to complete in background
+	go func() {
+		wg.Wait()
 		fyne.Do(func() {
 			ui.progressPanel.SetStatus("")
-			dialog.ShowInformation("Complete", fmt.Sprintf("All %d videos translated!", len(pendingJobs)), ui.window)
+			dialog.ShowInformation("Complete", fmt.Sprintf("All %d videos translated!", totalJobs), ui.window)
 		})
 	}()
 }
@@ -274,7 +307,21 @@ func (ui *MainUI) translateJobSync(job *models.TranslationJob) {
 		ui.progressPanel.SetCurrentJob(job)
 	})
 
-	err := ui.pipeline.Process(job)
+	// Use per-job progress callback for parallel processing
+	err := ui.pipeline.ProcessWithCallback(job, func(stage string, percent int, message string) {
+		fyne.Do(func() {
+			// Update job progress
+			job.Progress = percent
+			ui.fileListPanel.Refresh()
+
+			// Show detailed progress if this job is selected
+			selectedIdx := ui.fileListPanel.GetSelectedIndex()
+			if selectedIdx >= 0 && selectedIdx < len(ui.jobs) && ui.jobs[selectedIdx] == job {
+				ui.progressPanel.SetProgress(stage, percent)
+				ui.progressPanel.SetStatus(message)
+			}
+		})
+	})
 
 	fyne.Do(func() {
 		ui.fileListPanel.Refresh()
