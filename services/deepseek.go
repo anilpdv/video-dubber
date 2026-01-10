@@ -15,7 +15,7 @@ import (
 const (
 	deepSeekEndpoint     = "https://api.deepseek.com/v1/chat/completions"
 	deepSeekModel        = "deepseek-chat"
-	maxTranslateWorkers  = 3  // KrillinAI recommends 3
+	maxTranslateWorkers  = 5  // Increased from 3 for faster parallel translation
 	chunkSize            = 75 // 75 subtitles per batch - fewer API calls
 	maxTranslateRetries  = 3  // retry failed batches
 )

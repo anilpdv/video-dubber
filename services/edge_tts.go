@@ -233,7 +233,7 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 	}
 
 	// Process TTS jobs in parallel - Edge TTS is FREE with generous rate limits
-	const maxConcurrency = 5
+	const maxConcurrency = 10 // Increased from 5 - Edge TTS is FREE with generous rate limits
 	speechPaths := make(map[int]string)
 	var speechMutex sync.Mutex
 	var progressCount int

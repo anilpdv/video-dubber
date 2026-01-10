@@ -11,9 +11,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"video-translator/models"
 )
+
+const maxCosyWorkers = 2 // GPU-intensive, keep low
+
+// cosyJob represents a TTS synthesis job
+type cosyJob struct {
+	index int
+	text  string
+	path  string
+}
+
+// cosyResult contains the result of a synthesis job
+type cosyResult struct {
+	index int
+	path  string
+	err   error
+}
 
 // CosyVoiceService handles text-to-speech with voice cloning using CosyVoice
 // CosyVoice is an open-source TTS system from Alibaba that supports zero-shot voice cloning
@@ -256,12 +273,14 @@ func (s *CosyVoiceService) SynthesizeSubtitles(subs models.SubtitleList, outputP
 	return s.SynthesizeWithCallback(subs, outputPath, nil)
 }
 
-// SynthesizeWithCallback generates audio for subtitles with progress callback
+// SynthesizeWithCallback generates audio for subtitles with parallel workers (KrillinAI pattern)
 func (s *CosyVoiceService) SynthesizeWithCallback(
 	subs models.SubtitleList,
 	outputPath string,
 	onProgress func(current, total int),
 ) error {
+	LogInfo("CosyVoice: synthesizing %d subtitles with %d workers", len(subs), maxCosyWorkers)
+
 	if len(subs) == 0 {
 		return fmt.Errorf("no subtitles provided")
 	}
@@ -281,6 +300,73 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 	}
 	defer os.RemoveAll(segmentDir)
 
+	// Pre-calculate all synthesis jobs (only non-empty text)
+	var jobs []cosyJob
+	for i, sub := range subs {
+		if strings.TrimSpace(sub.Text) != "" {
+			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", i))
+			jobs = append(jobs, cosyJob{index: i, text: sub.Text, path: speechPath})
+		}
+	}
+
+	// Parallel synthesis of all speech segments
+	speechPaths := make(map[int]string)
+	var mu sync.Mutex
+	var firstErr error
+
+	if len(jobs) > 0 {
+		jobChan := make(chan cosyJob, len(jobs))
+		resultChan := make(chan cosyResult, len(jobs))
+
+		// Start worker pool
+		var wg sync.WaitGroup
+		for w := 0; w < maxCosyWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for job := range jobChan {
+					err := s.Synthesize(job.text, job.path)
+					resultChan <- cosyResult{index: job.index, path: job.path, err: err}
+				}
+			}()
+		}
+
+		// Send jobs
+		for _, job := range jobs {
+			jobChan <- job
+		}
+		close(jobChan)
+
+		// Close results when workers done
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
+
+		// Collect results
+		completed := 0
+		for result := range resultChan {
+			if result.err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("failed to synthesize subtitle %d: %w", result.index+1, result.err)
+				continue
+			}
+			if result.err == nil {
+				mu.Lock()
+				speechPaths[result.index] = result.path
+				mu.Unlock()
+			}
+			completed++
+			if onProgress != nil {
+				onProgress(completed, len(jobs))
+			}
+		}
+
+		if firstErr != nil {
+			return firstErr
+		}
+	}
+
+	// Sequential assembly with silence gaps (must maintain order)
 	var segmentPaths []string
 	var lastEndTime time.Duration
 
@@ -297,7 +383,7 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 			}
 		}
 
-		// Skip empty text - just add silence for the duration
+		// Handle empty text - just add silence
 		if strings.TrimSpace(sub.Text) == "" {
 			duration := sub.EndTime - sub.StartTime
 			if duration > 0 {
@@ -308,19 +394,16 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 				segmentPaths = append(segmentPaths, silencePath)
 			}
 			lastEndTime = sub.EndTime
-			if onProgress != nil {
-				onProgress(i+1, len(subs))
-			}
 			continue
 		}
 
-		// Generate speech for this subtitle with voice cloning
-		speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", i))
-		if err := s.Synthesize(sub.Text, speechPath); err != nil {
-			return fmt.Errorf("failed to synthesize subtitle %d: %w", i+1, err)
+		// Use pre-generated speech
+		speechPath, ok := speechPaths[i]
+		if !ok {
+			return fmt.Errorf("missing speech for subtitle %d", i+1)
 		}
 
-		// Adjust speech duration to match subtitle timing (if needed)
+		// Adjust speech duration to match subtitle timing
 		targetDuration := (sub.EndTime - sub.StartTime).Seconds()
 		if targetDuration > 0.2 {
 			adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", i))
@@ -331,11 +414,6 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 
 		segmentPaths = append(segmentPaths, speechPath)
 		lastEndTime = sub.EndTime
-
-		// Report progress
-		if onProgress != nil {
-			onProgress(i+1, len(subs))
-		}
 	}
 
 	// Concatenate all segments

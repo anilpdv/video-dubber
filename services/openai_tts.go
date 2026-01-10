@@ -16,7 +16,7 @@ import (
 
 // maxTTSWorkers is the number of concurrent TTS API calls
 // Reduced to avoid rate limiting and excessive resource usage
-const maxTTSWorkers = 4
+const maxTTSWorkers = 6 // Increased from 4 - OpenAI can handle more concurrent requests
 
 const openAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
 
