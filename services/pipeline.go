@@ -406,9 +406,18 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 
 	// Generate output path
 	outputPath := p.generateOutputPath(job.InputPath)
-	if err := p.ffmpeg.MuxVideoAudio(job.InputPath, dubbedAudioPath, outputPath); err != nil {
-		job.Fail(err)
-		return fmt.Errorf("video muxing failed: %w", err)
+
+	// Mux video with audio - optionally keep background audio
+	var muxErr error
+	if p.config.KeepBackgroundAudio && p.config.BackgroundAudioVolume > 0 {
+		reportProgress("Muxing", config.ProgressMuxStart+5, "Mixing dubbed audio with original background...")
+		muxErr = p.ffmpeg.MuxVideoAudioWithOriginal(job.InputPath, dubbedAudioPath, outputPath, p.config.BackgroundAudioVolume)
+	} else {
+		muxErr = p.ffmpeg.MuxVideoAudio(job.InputPath, dubbedAudioPath, outputPath)
+	}
+	if muxErr != nil {
+		job.Fail(muxErr)
+		return fmt.Errorf("video muxing failed: %w", muxErr)
 	}
 
 	job.Complete(outputPath)

@@ -31,6 +31,11 @@ type SettingsDialog struct {
 	deepSeekKeyEntry        *widget.Entry
 	groqAPIKeyEntry         *widget.Entry
 
+	// Audio mixing controls
+	keepBackgroundAudioCheck *widget.Check
+	backgroundVolumeSlider   *widget.Slider
+	backgroundVolumeLabel    *widget.Label
+
 	// Conditional containers
 	fasterWhisperSettings *fyne.Container
 	openaiTTSSettings     *fyne.Container
@@ -196,6 +201,17 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 	d.groqAPIKeyEntry.SetPlaceHolder("gsk_...")
 	d.groqAPIKeyEntry.SetText(d.config.GroqAPIKey)
 
+	// Audio mixing controls
+	d.keepBackgroundAudioCheck = widget.NewCheck("Keep background audio/music", nil)
+	d.keepBackgroundAudioCheck.SetChecked(d.config.KeepBackgroundAudio)
+
+	d.backgroundVolumeLabel = widget.NewLabel(fmt.Sprintf("Background volume: %.0f%%", d.config.BackgroundAudioVolume*100))
+	d.backgroundVolumeSlider = widget.NewSlider(0, 100)
+	d.backgroundVolumeSlider.Value = d.config.BackgroundAudioVolume * 100
+	d.backgroundVolumeSlider.OnChanged = func(value float64) {
+		d.backgroundVolumeLabel.SetText(fmt.Sprintf("Background volume: %.0f%%", value))
+	}
+
 	// Cost info
 	costInfo := widget.NewLabel(d.getCostEstimate())
 	costInfo.TextStyle = fyne.TextStyle{Italic: true}
@@ -218,6 +234,13 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 		widget.NewFormItem("Groq API Key", d.groqAPIKeyEntry),
 	)
 
+	// Audio mixing form
+	audioMixingForm := container.NewVBox(
+		d.keepBackgroundAudioCheck,
+		d.backgroundVolumeLabel,
+		d.backgroundVolumeSlider,
+	)
+
 	// Initialize conditional visibility
 	d.updateConditionalUI()
 
@@ -233,6 +256,9 @@ func (d *SettingsDialog) build() fyne.CanvasObject {
 		widget.NewSeparator(),
 		widget.NewLabel("API Keys"),
 		apiKeysForm,
+		widget.NewSeparator(),
+		widget.NewLabel("Audio Mixing"),
+		audioMixingForm,
 		widget.NewSeparator(),
 		widget.NewLabel("Cost Estimate (per 5hr video)"),
 		costInfo,
@@ -285,6 +311,9 @@ func (d *SettingsDialog) saveSettings() {
 	d.config.OpenAIKey = d.openAIKeyEntry.Text
 	d.config.DeepSeekKey = d.deepSeekKeyEntry.Text
 	d.config.GroqAPIKey = d.groqAPIKeyEntry.Text
+
+	d.config.KeepBackgroundAudio = d.keepBackgroundAudioCheck.Checked
+	d.config.BackgroundAudioVolume = d.backgroundVolumeSlider.Value / 100.0
 
 	d.config.UseOpenAIAPIs = (d.config.TranscriptionProvider == "openai" || d.config.TranslationProvider == "openai")
 

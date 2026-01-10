@@ -62,6 +62,10 @@ type Config struct {
 
 	// Smart segmentation (uses LLM to improve sentence boundaries)
 	UseSmartSegmentation bool `json:"use_smart_segmentation"`
+
+	// Audio mixing settings (keep background music/sounds)
+	KeepBackgroundAudio   bool    `json:"keep_background_audio"`
+	BackgroundAudioVolume float64 `json:"background_audio_volume"` // 0.0-1.0, default 0.3
 }
 
 func DefaultConfig() *Config {
@@ -118,6 +122,10 @@ func DefaultConfig() *Config {
 
 		// Smart segmentation
 		UseSmartSegmentation: false,
+
+		// Audio mixing (keep background music at 30% volume)
+		KeepBackgroundAudio:   true,
+		BackgroundAudioVolume: 0.3,
 	}
 }
 
