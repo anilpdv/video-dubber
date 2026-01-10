@@ -16,6 +16,15 @@ type FFmpegService struct {
 	ffmpegPath string
 }
 
+// ChunkInfo represents an audio chunk for parallel processing
+type ChunkInfo struct {
+	Index      int           // Chunk index (0-based)
+	Path       string        // Path to the chunk audio file
+	StartTime  float64       // Start time in the original audio (seconds)
+	Duration   float64       // Duration of this chunk (seconds)
+	HasOverlap bool          // True if this chunk has overlap with the next
+}
+
 // newFFmpegCmd creates a new command with timeout context
 func (s *FFmpegService) newCmd(args ...string) (*exec.Cmd, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutFFmpeg)
@@ -418,4 +427,98 @@ func (s *FFmpegService) ConvertToWAV(inputPath, outputPath string) error {
 	}
 
 	return nil
+}
+
+// SplitAudioIntoChunks splits an audio file into chunks for parallel transcription.
+// Each chunk has a configurable duration with overlap to prevent word cutoff at boundaries.
+// Returns a list of ChunkInfo with paths to the chunk files.
+func (s *FFmpegService) SplitAudioIntoChunks(inputPath, outputDir string, chunkDurationSecs, overlapSecs float64) ([]ChunkInfo, error) {
+	logger.LogInfo("FFmpeg: splitting audio into chunks (%.0fs each, %.1fs overlap)", chunkDurationSecs, overlapSecs)
+
+	// Get total audio duration
+	totalDuration, err := s.GetAudioDuration(inputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get audio duration: %w", err)
+	}
+
+	// Don't chunk if audio is shorter than minimum
+	minDuration := config.MinChunkDuration.Seconds()
+	if totalDuration <= minDuration {
+		// Return single chunk pointing to original file
+		logger.LogInfo("Audio (%.1fs) shorter than minimum chunk duration, using single chunk", totalDuration)
+		return []ChunkInfo{{
+			Index:      0,
+			Path:       inputPath,
+			StartTime:  0,
+			Duration:   totalDuration,
+			HasOverlap: false,
+		}}, nil
+	}
+
+	// Create output directory
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create chunk output directory: %w", err)
+	}
+
+	var chunks []ChunkInfo
+	chunkIndex := 0
+
+	// Calculate actual chunk duration (without overlap for stepping)
+	stepDuration := chunkDurationSecs
+
+	for startTime := 0.0; startTime < totalDuration; startTime += stepDuration {
+		// Calculate this chunk's duration (with overlap, except for last chunk)
+		remaining := totalDuration - startTime
+		chunkDur := chunkDurationSecs + overlapSecs
+		hasOverlap := true
+
+		// Last chunk: don't extend beyond audio length
+		if remaining <= chunkDurationSecs+overlapSecs {
+			chunkDur = remaining
+			hasOverlap = false
+		}
+
+		// Generate chunk path
+		chunkPath := filepath.Join(outputDir, fmt.Sprintf("chunk_%04d.wav", chunkIndex))
+
+		// Extract chunk using ffmpeg
+		args := []string{
+			"-i", inputPath,
+			"-ss", fmt.Sprintf("%.3f", startTime),
+			"-t", fmt.Sprintf("%.3f", chunkDur),
+			"-ar", "16000",         // Whisper requirement
+			"-ac", "1",             // Mono
+			"-acodec", "pcm_s16le", // PCM 16-bit
+			"-y",
+			chunkPath,
+		}
+
+		cmd, cancel := s.newCmd(args...)
+		output, err := cmd.CombinedOutput()
+		cancel()
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract chunk %d: %w\nOutput: %s", chunkIndex, err, string(output))
+		}
+
+		chunks = append(chunks, ChunkInfo{
+			Index:      chunkIndex,
+			Path:       chunkPath,
+			StartTime:  startTime,
+			Duration:   chunkDur,
+			HasOverlap: hasOverlap,
+		})
+
+		chunkIndex++
+	}
+
+	logger.LogInfo("FFmpeg: created %d audio chunks from %.1fs audio", len(chunks), totalDuration)
+	return chunks, nil
+}
+
+// CleanupChunks removes all chunk files from a directory
+func (s *FFmpegService) CleanupChunks(chunks []ChunkInfo) {
+	for _, chunk := range chunks {
+		os.Remove(chunk.Path)
+	}
 }

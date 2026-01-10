@@ -264,8 +264,9 @@ func (s *OpenAITTSService) SynthesizeWithCallback(
 			}
 		}
 
-		// Run worker pool
-		results, err := worker.Process(jobs, config.WorkersOpenAITTS, processJob, progressCallback)
+		// Run worker pool with dynamic worker count
+		workers := config.DynamicWorkerCount("tts-api")
+		results, err := worker.Process(jobs, workers, processJob, progressCallback)
 		if err != nil {
 			return fmt.Errorf("TTS synthesis failed: %w", err)
 		}
@@ -276,12 +277,12 @@ func (s *OpenAITTSService) SynthesizeWithCallback(
 		}
 	}
 
-	// Build final audio using AudioAssembler
+	// Build final audio using AudioAssembler with parallel gap processing
 	internalSubs := models.ToInternalSubtitles(subs)
 	ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
 	assembler := media.NewAudioAssembler(ffmpegMedia, segmentDir)
 
-	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+	if err := assembler.AssembleFromSpeechPathsParallel(internalSubs, speechPaths, outputPath); err != nil {
 		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 

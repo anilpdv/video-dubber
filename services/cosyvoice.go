@@ -276,7 +276,7 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 	outputPath string,
 	onProgress func(current, total int),
 ) error {
-	logger.LogInfo("CosyVoice: synthesizing %d subtitles with %d workers", len(subs), config.WorkersCosyVoice)
+	logger.LogInfo("CosyVoice: synthesizing %d subtitles with %d workers", len(subs), config.DynamicWorkerCount("tts-local"))
 
 	if len(subs) == 0 {
 		return fmt.Errorf("no subtitles provided")
@@ -345,8 +345,9 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 			}
 		}
 
-		// Run worker pool
-		results, err := worker.Process(jobs, config.WorkersCosyVoice, processJob, progressCallback)
+		// Run worker pool with dynamic worker count (GPU-intensive local TTS)
+		workers := config.DynamicWorkerCount("tts-local")
+		results, err := worker.Process(jobs, workers, processJob, progressCallback)
 		if err != nil {
 			return fmt.Errorf("TTS synthesis failed: %w", err)
 		}
@@ -357,12 +358,12 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 		}
 	}
 
-	// Build final audio using AudioAssembler
+	// Build final audio using AudioAssembler with parallel gap processing
 	internalSubs := models.ToInternalSubtitles(subs)
 	ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
 	assembler := media.NewAudioAssembler(ffmpegMedia, segmentDir)
 
-	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+	if err := assembler.AssembleFromSpeechPathsParallel(internalSubs, speechPaths, outputPath); err != nil {
 		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 

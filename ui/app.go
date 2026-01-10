@@ -24,8 +24,20 @@ import (
 	"video-translator/ui/widgets"
 )
 
-// maxParallelVideos limits concurrent video processing to avoid overloading the computer
-const maxParallelVideos = 2
+// maxParallelVideos limits concurrent video processing to avoid overloading the computer.
+// Dynamic based on CPU cores: at least 2, scales with available cores for batch processing.
+var maxParallelVideos = func() int {
+	cpus := runtime.NumCPU()
+	// For batch processing: allow 1 video per 4 cores, minimum 2, maximum 8
+	parallel := cpus / 4
+	if parallel < 2 {
+		parallel = 2
+	}
+	if parallel > 8 {
+		parallel = 8
+	}
+	return parallel
+}()
 
 // MainUI is the main application UI
 type MainUI struct {

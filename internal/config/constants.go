@@ -1,7 +1,10 @@
 // Package config provides centralized configuration and constants for the video-translator application.
 package config
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // Progress stage boundaries (0-100%)
 const (
@@ -22,17 +25,24 @@ const (
 	WorkersPiperTTS   = 2  // CPU-intensive, local processing
 	WorkersCosyVoice  = 2  // GPU-intensive, local processing
 	WorkersArgos      = 4  // Python subprocess overhead
-	WorkersOpenAI     = 4  // API calls, moderate concurrency
-	WorkersOpenAITTS  = 6  // API calls, can handle more
-	WorkersDeepSeek   = 8  // API calls, generous limits
-	WorkersEdgeTTS    = 10 // Free API, generous rate limits
+	WorkersOpenAI     = 20 // API calls, OpenAI handles high concurrency
+	WorkersOpenAITTS  = 25 // API calls, TTS is fast
+	WorkersDeepSeek   = 25 // API calls, generous limits
+	WorkersEdgeTTS    = 30 // Free API, very generous rate limits
+)
+
+// Audio chunking settings for parallel transcription
+const (
+	AudioChunkDuration = 5 * time.Minute  // Split audio into 5-minute chunks
+	AudioChunkOverlap  = 2 * time.Second  // 2-second overlap to avoid word cutoff
+	MinChunkDuration   = 30 * time.Second // Don't chunk audio shorter than this
 )
 
 // Translation chunk sizes (subtitles per batch)
 const (
-	ChunkSizeArgos    = 50  // Local processing, moderate batch
-	ChunkSizeOpenAI   = 50  // API token limits
-	ChunkSizeDeepSeek = 120 // Larger batches, fewer API calls
+	ChunkSizeArgos    = 50 // Local processing, moderate batch
+	ChunkSizeOpenAI   = 50 // API token limits
+	ChunkSizeDeepSeek = 20 // Smaller batches = more parallelism (200 subs → 10 batches → 10 workers active)
 )
 
 // Retry settings
@@ -126,3 +136,43 @@ const (
 	ExecTimeoutFFmpeg  = 10 * time.Minute  // Audio/video processing
 	ExecTimeoutWhisper = 30 * time.Minute  // Transcription (can be long)
 )
+
+// DynamicWorkerCount returns the optimal worker count based on task type and CPU cores.
+// This allows scaling workers based on system resources rather than fixed values.
+func DynamicWorkerCount(taskType string) int {
+	cpus := runtime.NumCPU()
+
+	switch taskType {
+	case "transcription":
+		// CPU-bound, use all cores but cap at 8 for memory
+		return minInt(cpus, 8)
+	case "translation-api":
+		// I/O-bound API calls, can use more workers
+		return minInt(cpus*3, 30)
+	case "tts-api":
+		// I/O-bound TTS API calls
+		return minInt(cpus*4, 40)
+	case "tts-local":
+		// CPU/GPU intensive local TTS
+		return maxInt(cpus/2, 2)
+	case "silence-generation":
+		// Light FFmpeg operations
+		return minInt(cpus*2, 16)
+	default:
+		return cpus
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

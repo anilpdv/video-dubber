@@ -272,7 +272,9 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 		}
 
 		// Run worker pool with error tolerance (Edge TTS generates silence for failed segments)
-		results, errors := worker.ProcessWithErrors(jobs, config.WorkersEdgeTTS, processJob, progressCallback)
+		// Use dynamic worker count for optimal parallelism based on system resources
+		workers := config.DynamicWorkerCount("tts-api")
+		results, errors := worker.ProcessWithErrors(jobs, workers, processJob, progressCallback)
 
 		// Build speech paths map, using silence for failed jobs
 		ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
@@ -293,12 +295,12 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 		}
 	}
 
-	// Build final audio using AudioAssembler
+	// Build final audio using AudioAssembler with parallel gap processing
 	internalSubs := models.ToInternalSubtitles(subs)
 	ffmpegMediaFinal := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
 	assembler := media.NewAudioAssembler(ffmpegMediaFinal, segmentDir)
 
-	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+	if err := assembler.AssembleFromSpeechPathsParallel(internalSubs, speechPaths, outputPath); err != nil {
 		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 

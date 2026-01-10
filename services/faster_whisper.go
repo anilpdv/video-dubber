@@ -7,12 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"video-translator/internal/config"
 	"video-translator/internal/logger"
 	"video-translator/internal/subtitle"
 	"video-translator/internal/text"
+	"video-translator/internal/worker"
 	"video-translator/models"
 )
 
@@ -216,4 +220,115 @@ func (s *FasterWhisperService) TranscribeToText(audioPath, language string) (str
 	}
 
 	return strings.Join(texts, " "), nil
+}
+
+// TranscribeChunksParallel transcribes multiple audio chunks in parallel using worker pools.
+// This provides significant speedup for long videos, especially on multi-core systems.
+// Each chunk's subtitles are adjusted with the correct offset timestamp.
+func (s *FasterWhisperService) TranscribeChunksParallel(
+	chunks []ChunkInfo,
+	language string,
+	onProgress func(completed, total int),
+) (models.SubtitleList, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no chunks to transcribe")
+	}
+
+	// Single chunk - use regular transcription
+	if len(chunks) == 1 {
+		return s.Transcribe(chunks[0].Path, language)
+	}
+
+	logger.LogInfo("FasterWhisper: transcribing %d chunks in parallel", len(chunks))
+
+	// Determine worker count - FasterWhisper is more GPU-bound so fewer workers
+	workers := config.DynamicWorkerCount("transcription")
+	// For GPU transcription, limit to 2-4 concurrent processes to avoid GPU OOM
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > len(chunks) {
+		workers = len(chunks)
+	}
+
+	// Define processing function for each chunk
+	processChunk := func(job worker.Job[ChunkInfo]) (models.SubtitleList, error) {
+		chunk := job.Data
+		subs, err := s.Transcribe(chunk.Path, language)
+		if err != nil {
+			return nil, fmt.Errorf("chunk %d transcription failed: %w", chunk.Index, err)
+		}
+
+		// Adjust timestamps with chunk offset
+		offsetDuration := time.Duration(chunk.StartTime * float64(time.Second))
+		for i := range subs {
+			subs[i].StartTime += offsetDuration
+			subs[i].EndTime += offsetDuration
+		}
+
+		return subs, nil
+	}
+
+	// Process chunks in parallel
+	results, err := worker.Process(chunks, workers, processChunk, onProgress)
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge all results and handle overlap
+	return mergeChunkSubtitlesFW(results), nil
+}
+
+// mergeChunkSubtitlesFW merges subtitles from multiple chunks, handling overlap regions.
+func mergeChunkSubtitlesFW(chunkResults []models.SubtitleList) models.SubtitleList {
+	if len(chunkResults) == 0 {
+		return nil
+	}
+
+	// Flatten all subtitles
+	var allSubs models.SubtitleList
+	for _, subs := range chunkResults {
+		allSubs = append(allSubs, subs...)
+	}
+
+	// Sort by start time
+	sort.Slice(allSubs, func(i, j int) bool {
+		return allSubs[i].StartTime < allSubs[j].StartTime
+	})
+
+	// Deduplicate overlapping subtitles
+	var merged models.SubtitleList
+	for _, sub := range allSubs {
+		if len(merged) == 0 {
+			merged = append(merged, sub)
+			continue
+		}
+
+		last := merged[len(merged)-1]
+
+		// Check if this subtitle overlaps significantly with the last one
+		overlapStart := last.StartTime
+		if sub.StartTime > overlapStart {
+			overlapStart = sub.StartTime
+		}
+		overlapEnd := last.EndTime
+		if sub.EndTime < overlapEnd {
+			overlapEnd = sub.EndTime
+		}
+
+		if overlapEnd > overlapStart {
+			// There is overlap
+			overlapDuration := overlapEnd - overlapStart
+			subDuration := sub.EndTime - sub.StartTime
+
+			// If overlap is >80% of subtitle duration, skip (duplicate)
+			if subDuration > 0 && float64(overlapDuration)/float64(subDuration) > 0.8 {
+				continue
+			}
+		}
+
+		merged = append(merged, sub)
+	}
+
+	return merged
 }

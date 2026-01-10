@@ -148,63 +148,118 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 	job.AudioPath = audioPath
 	reportProgress("Extracting", config.ProgressExtractEnd, "Audio extracted")
 
-	// Stage 2: Transcribe
+	// Stage 2: Transcribe (with parallel chunking for long audio)
 	provider := p.getTranscriptionProvider()
 	logger.LogInfo("Pipeline: Stage 2/5 - Transcribing with %s (lang=%s)", provider, job.SourceLang)
 	reportProgress("Transcribing", config.ProgressTranscribeStart, "Starting transcription...")
 	job.SetStatus(models.StatusTranscribing, "Transcribing audio", config.ProgressTranscribeStart)
 
+	// Get audio duration to determine if chunking is beneficial
+	audioDuration, _ := p.ffmpeg.GetVideoDuration(audioPath)
+
 	var subtitles models.SubtitleList
 	var err error
-	switch provider {
-	case "faster-whisper":
-		reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using FasterWhisper (GPU accelerated)...")
-		audioDuration, _ := p.ffmpeg.GetVideoDuration(audioPath)
-		subtitles, err = p.fasterWhisper.TranscribeWithProgress(
-			audioPath,
-			job.SourceLang,
-			audioDuration,
-			func(currentSec float64, percent int) {
-				remaining := audioDuration - currentSec
-				var msg string
-				if remaining > 60 {
-					msg = fmt.Sprintf("FasterWhisper: %.0f min remaining", remaining/60)
-				} else {
-					msg = fmt.Sprintf("FasterWhisper: %.0f sec remaining", remaining)
-				}
-				reportProgress("Transcribing", percent, msg)
-			},
-		)
 
-	case "openai":
-		reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using OpenAI Whisper API...")
-		subtitles, err = p.whisper.TranscribeWithOpenAI(
-			audioPath,
-			p.config.OpenAIKey,
-			job.SourceLang,
-			func(percent int, message string) {
-				reportProgress("Transcribing", percent, message)
-			},
-		)
+	// Use parallel chunking for audio longer than 30 seconds (for local providers)
+	useChunking := audioDuration > config.MinChunkDuration.Seconds() && provider != "openai"
 
-	default: // "whisper-cpp"
-		reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using local Whisper...")
-		audioDuration, _ := p.ffmpeg.GetVideoDuration(audioPath)
-		subtitles, err = p.whisper.TranscribeWithProgress(
+	if useChunking && (provider == "whisper-cpp" || provider == "faster-whisper") {
+		// Split audio into chunks for parallel processing
+		chunkDir := filepath.Join(jobTempDir, "chunks")
+		chunks, chunkErr := p.ffmpeg.SplitAudioIntoChunks(
 			audioPath,
-			job.SourceLang,
-			audioDuration,
-			func(currentSec float64, percent int) {
-				remaining := audioDuration - currentSec
-				var msg string
-				if remaining > 60 {
-					msg = fmt.Sprintf("Transcribing... %.0f min remaining", remaining/60)
-				} else {
-					msg = fmt.Sprintf("Transcribing... %.0f sec remaining", remaining)
-				}
-				reportProgress("Transcribing", percent, msg)
-			},
+			chunkDir,
+			config.AudioChunkDuration.Seconds(),
+			config.AudioChunkOverlap.Seconds(),
 		)
+		if chunkErr != nil {
+			logger.LogError("Failed to split audio: %v, falling back to sequential", chunkErr)
+			useChunking = false
+		} else {
+			defer p.ffmpeg.CleanupChunks(chunks)
+
+			// Calculate progress range for transcription
+			transcribeRange := config.ProgressTranscribeEnd - config.ProgressTranscribeStart
+
+			switch provider {
+			case "faster-whisper":
+				reportProgress("Transcribing", config.ProgressTranscribeStart+1,
+					fmt.Sprintf("FasterWhisper: processing %d chunks in parallel...", len(chunks)))
+				subtitles, err = p.fasterWhisper.TranscribeChunksParallel(
+					chunks,
+					job.SourceLang,
+					func(completed, total int) {
+						percent := config.ProgressTranscribeStart + (completed*transcribeRange)/total
+						reportProgress("Transcribing", percent,
+							fmt.Sprintf("FasterWhisper: %d/%d chunks", completed, total))
+					},
+				)
+			default: // whisper-cpp
+				reportProgress("Transcribing", config.ProgressTranscribeStart+1,
+					fmt.Sprintf("Whisper: processing %d chunks in parallel...", len(chunks)))
+				subtitles, err = p.whisper.TranscribeChunksParallel(
+					chunks,
+					job.SourceLang,
+					func(completed, total int) {
+						percent := config.ProgressTranscribeStart + (completed*transcribeRange)/total
+						reportProgress("Transcribing", percent,
+							fmt.Sprintf("Whisper: %d/%d chunks", completed, total))
+					},
+				)
+			}
+		}
+	}
+
+	// Fallback to sequential transcription (or if chunking wasn't used)
+	if !useChunking || subtitles == nil {
+		switch provider {
+		case "faster-whisper":
+			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using FasterWhisper (GPU accelerated)...")
+			subtitles, err = p.fasterWhisper.TranscribeWithProgress(
+				audioPath,
+				job.SourceLang,
+				audioDuration,
+				func(currentSec float64, percent int) {
+					remaining := audioDuration - currentSec
+					var msg string
+					if remaining > 60 {
+						msg = fmt.Sprintf("FasterWhisper: %.0f min remaining", remaining/60)
+					} else {
+						msg = fmt.Sprintf("FasterWhisper: %.0f sec remaining", remaining)
+					}
+					reportProgress("Transcribing", percent, msg)
+				},
+			)
+
+		case "openai":
+			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using OpenAI Whisper API...")
+			subtitles, err = p.whisper.TranscribeWithOpenAI(
+				audioPath,
+				p.config.OpenAIKey,
+				job.SourceLang,
+				func(percent int, message string) {
+					reportProgress("Transcribing", percent, message)
+				},
+			)
+
+		default: // "whisper-cpp"
+			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using local Whisper...")
+			subtitles, err = p.whisper.TranscribeWithProgress(
+				audioPath,
+				job.SourceLang,
+				audioDuration,
+				func(currentSec float64, percent int) {
+					remaining := audioDuration - currentSec
+					var msg string
+					if remaining > 60 {
+						msg = fmt.Sprintf("Transcribing... %.0f min remaining", remaining/60)
+					} else {
+						msg = fmt.Sprintf("Transcribing... %.0f sec remaining", remaining)
+					}
+					reportProgress("Transcribing", percent, msg)
+				},
+			)
+		}
 	}
 
 	if err != nil {
