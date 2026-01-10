@@ -232,8 +232,8 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 		}
 	}
 
-	// Process TTS jobs in parallel (reduced to avoid CPU overload)
-	const maxConcurrency = 2
+	// Process TTS jobs in parallel - Edge TTS is FREE with generous rate limits
+	const maxConcurrency = 5
 	speechPaths := make(map[int]string)
 	var speechMutex sync.Mutex
 	var progressCount int
@@ -343,6 +343,18 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 		// Check if we have speech for this subtitle
 		if speechPath, ok := speechPaths[i]; ok {
 			segmentPaths = append(segmentPaths, speechPath)
+
+			// Pad audio with silence if shorter than window to maintain sync
+			windowDuration := (sub.EndTime - sub.StartTime).Seconds()
+			if actualDuration, err := s.ffmpeg.GetAudioDuration(speechPath); err == nil {
+				if actualDuration < windowDuration-0.05 { // 50ms tolerance
+					paddingDuration := windowDuration - actualDuration
+					paddingPath := filepath.Join(segmentDir, fmt.Sprintf("padding_%04d.wav", i))
+					if err := s.ffmpeg.GenerateSilence(paddingDuration, paddingPath); err == nil {
+						segmentPaths = append(segmentPaths, paddingPath)
+					}
+				}
+			}
 		} else {
 			// Empty subtitle - add silence for the duration
 			duration := sub.EndTime - sub.StartTime

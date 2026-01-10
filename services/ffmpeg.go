@@ -222,7 +222,9 @@ func (s *FFmpegService) ConcatAudioFiles(inputPaths []string, outputPath string)
 		"-f", "concat",
 		"-safe", "0",
 		"-i", listPath,
-		"-c", "copy",
+		"-acodec", "pcm_s16le", // Re-encode to WAV for consistent format (was -c copy)
+		"-ar", "24000",         // Consistent sample rate
+		"-ac", "1",             // Mono
 		"-y",
 		outputPath,
 	}
@@ -278,7 +280,17 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 	// Audio is too long - calculate tempo factor to speed it up
 	// tempo > 1.0 = speed up (shorter duration)
 	tempoFactor := actualDuration / targetDuration
-	LogDebug("Audio %.2fs > %.2fs window - speeding up by %.2fx", actualDuration, targetDuration, tempoFactor)
+
+	// Cap speed-up at 1.3x - anything faster sounds unnatural
+	// Better to have slight audio overlap than chipmunk speech
+	const maxSpeedUp = 1.3
+	if tempoFactor > maxSpeedUp {
+		LogDebug("Audio %.2fs > %.2fs window - capping speed-up from %.2fx to %.2fx",
+			actualDuration, targetDuration, tempoFactor, maxSpeedUp)
+		tempoFactor = maxSpeedUp
+	} else {
+		LogDebug("Audio %.2fs > %.2fs window - speeding up by %.2fx", actualDuration, targetDuration, tempoFactor)
+	}
 
 	// atempo filter only accepts 0.5-2.0 range
 	// For values outside this range, we need to chain multiple atempo filters
@@ -303,12 +315,23 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 		}
 	}
 
+	// Calculate output duration after tempo adjustment
+	outputDuration := actualDuration / tempoFactor
+
+	// Build ffmpeg command
 	args := []string{
 		"-i", inputPath,
 		"-filter:a", filterStr,
-		"-y",
-		outputPath,
 	}
+
+	// If output would still exceed target (due to speed cap), trim to fit exactly
+	// This prevents audio overflow that causes voice-video sync drift
+	if outputDuration > targetDuration+0.05 { // 50ms tolerance
+		LogDebug("Trimming audio from %.2fs to %.2fs to maintain sync", outputDuration, targetDuration)
+		args = append(args, "-t", fmt.Sprintf("%.3f", targetDuration))
+	}
+
+	args = append(args, "-y", outputPath)
 
 	cmd := exec.Command(s.ffmpegPath, args...)
 	output, err := cmd.CombinedOutput()
@@ -328,6 +351,7 @@ func abs(x float64) float64 {
 }
 
 // GenerateSilence creates a silent audio file of specified duration
+// Outputs WAV format (pcm_s16le) at 24kHz mono to match Edge TTS output
 func (s *FFmpegService) GenerateSilence(duration float64, outputPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
@@ -336,7 +360,9 @@ func (s *FFmpegService) GenerateSilence(duration float64, outputPath string) err
 	args := []string{
 		"-f", "lavfi",
 		"-i", fmt.Sprintf("anullsrc=r=24000:cl=mono:d=%.3f", duration),
-		"-acodec", "libmp3lame",
+		"-acodec", "pcm_s16le", // WAV format (was libmp3lame which caused beeps)
+		"-ar", "24000",         // 24kHz sample rate (match ConvertToWAV)
+		"-ac", "1",             // Mono
 		"-y",
 		outputPath,
 	}
