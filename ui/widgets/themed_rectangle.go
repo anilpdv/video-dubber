@@ -49,7 +49,10 @@ func (r *ThemedRectangle) SetMinSize(size fyne.Size) {
 
 // CreateRenderer implements fyne.Widget
 func (r *ThemedRectangle) CreateRenderer() fyne.WidgetRenderer {
-	rect := canvas.NewRectangle(color.Transparent)
+	th := fyne.CurrentApp().Settings().Theme()
+	variant := fyne.CurrentApp().Settings().ThemeVariant()
+
+	rect := canvas.NewRectangle(th.Color(r.ColorName, variant))
 	rect.CornerRadius = r.CornerRadius
 
 	return &themedRectangleRenderer{
@@ -117,7 +120,10 @@ func NewPanel(colorName fyne.ThemeColorName, content fyne.CanvasObject) *Panel {
 
 // CreateRenderer implements fyne.Widget
 func (p *Panel) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(color.Transparent)
+	th := fyne.CurrentApp().Settings().Theme()
+	variant := fyne.CurrentApp().Settings().ThemeVariant()
+
+	bg := canvas.NewRectangle(th.Color(p.ColorName, variant))
 	bg.CornerRadius = p.CornerRadius
 
 	return &panelRenderer{

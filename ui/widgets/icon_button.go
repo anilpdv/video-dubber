@@ -217,7 +217,10 @@ func (b *PrimaryButton) MouseUp(_ *desktop.MouseEvent) {
 
 // CreateRenderer implements fyne.Widget
 func (b *PrimaryButton) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(color.Transparent)
+	th := fyne.CurrentApp().Settings().Theme()
+	variant := fyne.CurrentApp().Settings().ThemeVariant()
+
+	bg := canvas.NewRectangle(th.Color(theme.ColorNamePrimary, variant))
 	bg.CornerRadius = 8
 
 	label := canvas.NewText(b.Text, color.White)

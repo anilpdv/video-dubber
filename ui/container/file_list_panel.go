@@ -131,7 +131,7 @@ func (p *FileListPanel) Build() fyne.CanvasObject {
 	p.scrollable = container.NewVScroll(p.content)
 	p.scrollable.SetMinSize(fyne.NewSize(250, 200))
 
-	// Action buttons
+	// Action buttons - toolbar style below header
 	p.addBtn = widget.NewButtonWithIcon("Add Files", theme.ContentAddIcon(), func() {
 		p.showFileDialog()
 	})
@@ -147,15 +147,22 @@ func (p *FileListPanel) Build() fyne.CanvasObject {
 		}
 	})
 
-	buttons := container.NewHBox(
+	// Toolbar with buttons (padded for left margin)
+	toolbar := container.NewPadded(container.NewHBox(
 		p.addBtn,
 		p.addFolderBtn,
 		p.removeBtn,
+	))
+
+	// Header + toolbar at top
+	topSection := container.NewVBox(
+		p.header,
+		toolbar,
 	)
 
 	return container.NewBorder(
-		p.header,
-		buttons,
+		topSection,
+		nil, // No bottom content
 		nil,
 		nil,
 		p.scrollable,

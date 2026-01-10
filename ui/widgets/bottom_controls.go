@@ -29,7 +29,6 @@ type BottomControls struct {
 
 	translateBtn    *PrimaryButton
 	translateAllBtn *widget.Button
-	settingsBtn     *IconButton
 }
 
 // NewBottomControls creates the bottom control bar
@@ -86,6 +85,16 @@ func (c *BottomControls) SetVoiceOptions(provider string) {
 	}
 }
 
+// createCard creates a card-like container with subtle background and centered content
+func createCard(content fyne.CanvasObject) fyne.CanvasObject {
+	bg := canvas.NewRectangle(color.NRGBA{R: 40, G: 40, B: 40, A: 255})
+	bg.CornerRadius = 8
+	return container.NewStack(
+		bg,
+		container.NewCenter(container.NewPadded(content)),
+	)
+}
+
 // Build creates the control bar UI
 func (c *BottomControls) Build() fyne.CanvasObject {
 	// Source language selector
@@ -107,33 +116,29 @@ func (c *BottomControls) Build() fyne.CanvasObject {
 		}
 	})
 
-	// Language selection row with proper spacing
+	// === TRANSLATION SECTION ===
 	fromLabel := widget.NewLabel("From:")
+	fromLabel.Alignment = fyne.TextAlignTrailing
 	toLabel := widget.NewLabel("To:")
+	toLabel.Alignment = fyne.TextAlignTrailing
 
-	langRow := container.NewHBox(
-		fromLabel,
-		c.sourceSelector.Build(),
-		container.NewPadded(arrow),
-		toLabel,
-		c.targetSelector.Build(),
+	translationContent := container.NewVBox(
+		container.NewHBox(fromLabel, c.sourceSelector.Build()),
+		container.NewHBox(toLabel, c.targetSelector.Build()),
 	)
+	translationCard := createCard(translationContent)
 
-	// Voice row
+	// === VOICE SECTION ===
 	voiceLabel := widget.NewLabel("Voice:")
-	voiceRow := container.NewHBox(
-		voiceLabel,
+	voiceContent := container.NewVBox(
+		container.NewCenter(voiceLabel),
 		c.voiceSelector.Build(),
 	)
+	voiceCard := createCard(voiceContent)
 
-	// Center section: language and voice controls with vertical spacing
-	centerSection := container.NewVBox(
-		langRow,
-		voiceRow,
-	)
-
+	// === ACTION SECTION ===
 	// Translate button (primary action)
-	c.translateBtn = NewPrimaryButton("Translate Selected", theme.MediaPlayIcon(), func() {
+	c.translateBtn = NewPrimaryButton("Translate", theme.MediaPlayIcon(), func() {
 		if c.OnTranslateSelected != nil {
 			c.OnTranslateSelected()
 		}
@@ -146,32 +151,24 @@ func (c *BottomControls) Build() fyne.CanvasObject {
 		}
 	})
 
-	// Settings button
-	c.settingsBtn = NewIconButton(theme.SettingsIcon(), func() {
-		if c.OnSettings != nil {
-			c.OnSettings()
-		}
-	})
-
-	// Right section: action buttons stacked vertically
-	rightSection := container.NewVBox(
-		container.NewHBox(
-			c.translateBtn,
-			c.settingsBtn,
-		),
+	actionContent := container.NewVBox(
+		c.translateBtn,
 		c.translateAllBtn,
 	)
+	actionCard := createCard(actionContent)
 
-	// Use HBox with spacers for better horizontal distribution
+	// === MAIN LAYOUT ===
+	// Arrange cards horizontally with spacing
 	content := container.NewHBox(
 		layout.NewSpacer(),
-		centerSection,
+		translationCard,
+		voiceCard,
 		layout.NewSpacer(),
-		rightSection,
+		actionCard,
 	)
 
 	// Wrap with background and padding
-	paddedContent := container.NewPadded(container.NewPadded(content))
+	paddedContent := container.NewPadded(content)
 
 	return container.NewStack(
 		NewThemedRectangle(appTheme.ColorNameBottomPanel),

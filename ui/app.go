@@ -18,7 +18,6 @@ import (
 	"video-translator/models"
 	"video-translator/services"
 	uicontainer "video-translator/ui/container"
-	"video-translator/ui/dialogs"
 	"video-translator/ui/layouts"
 	appTheme "video-translator/ui/theme"
 	"video-translator/ui/widgets"
@@ -37,11 +36,19 @@ type MainUI struct {
 	pipeline *services.Pipeline
 
 	// UI Components
-	sidebar        *widgets.SidebarNav
-	fileListPanel  *uicontainer.FileListPanel
-	progressPanel  *uicontainer.ProgressPanel
-	bottomControls *widgets.BottomControls
-	mainContent    *fyne.Container
+	sidebar           *widgets.SidebarNav
+	fileListPanel     *uicontainer.FileListPanel
+	progressPanel     *uicontainer.ProgressPanel
+	settingsPanel     *uicontainer.SettingsPanel
+	dependenciesPanel *uicontainer.DependenciesPanel
+	bottomControls    *widgets.BottomControls
+	mainContent       *fyne.Container
+
+	// View containers for swapping
+	translateView    *fyne.Container
+	settingsView     fyne.CanvasObject
+	dependenciesView fyne.CanvasObject
+	contentArea      *fyne.Container
 
 	// Current view
 	currentView string
@@ -94,11 +101,27 @@ func (ui *MainUI) Build() fyne.CanvasObject {
 	ui.progressPanel = uicontainer.NewProgressPanel()
 	ui.progressPanel.SetOutputDirectory(ui.config.OutputDirectory)
 
+	// Create settings panel
+	ui.settingsPanel = uicontainer.NewSettingsPanel(ui.window, ui.config)
+	ui.settingsPanel.OnSave = func(config *models.Config) {
+		ui.config = config
+		ui.pipeline = services.NewPipeline(config)
+		ui.pipeline.SetProgressCallback(func(stage string, percent int, message string) {
+			fyne.Do(func() {
+				if ui.progressPanel != nil {
+					ui.progressPanel.SetProgress(stage, percent)
+					ui.progressPanel.SetStatus(message)
+				}
+			})
+		})
+		ui.bottomControls.SetTTSProvider(config.TTSProvider)
+		ui.progressPanel.SetOutputDirectory(config.OutputDirectory)
+	}
+
 	// Create bottom controls
 	ui.bottomControls = widgets.NewBottomControls()
 	ui.bottomControls.OnTranslateSelected = ui.onTranslateSelected
 	ui.bottomControls.OnTranslateAll = ui.onTranslateAll
-	ui.bottomControls.OnSettings = ui.showSettings
 	ui.bottomControls.SetOnPreviewVoice(ui.previewSelectedVoice)
 	ui.bottomControls.SetTTSProvider(ui.config.TTSProvider)
 
@@ -109,18 +132,32 @@ func (ui *MainUI) Build() fyne.CanvasObject {
 	mainSplit := container.NewHSplit(fileListContent, progressContent)
 	mainSplit.SetOffset(0.4)
 
-	// Content with bottom bar
-	contentWithBottom := container.New(
-		layouts.NewContentWithBottomBar(140),
+	// Translate view with bottom bar
+	ui.translateView = container.New(
+		layouts.NewContentWithBottomBar(160),
 		mainSplit,
 		ui.bottomControls.Build(),
 	)
+
+	// Settings view with right margin
+	settingsRightSpacer := widgets.NewThemedRectangle(theme.ColorNameBackground)
+	settingsRightSpacer.SetMinSize(fyne.NewSize(20, 0))
+	ui.settingsView = container.NewBorder(nil, nil, nil, settingsRightSpacer, ui.settingsPanel.Build())
+
+	// Dependencies panel with right margin
+	ui.dependenciesPanel = uicontainer.NewDependenciesPanel(ui.pipeline.CheckDependencies)
+	depsRightSpacer := widgets.NewThemedRectangle(theme.ColorNameBackground)
+	depsRightSpacer.SetMinSize(fyne.NewSize(20, 0))
+	ui.dependenciesView = container.NewBorder(nil, nil, nil, depsRightSpacer, ui.dependenciesPanel.Build())
+
+	// Content area that can swap between views
+	ui.contentArea = container.NewStack(ui.translateView)
 
 	// Full layout with sidebar
 	ui.mainContent = container.New(
 		layouts.NewSidebarLayout(200),
 		ui.buildSidebarWithBackground(),
-		contentWithBottom,
+		ui.contentArea,
 	)
 
 	return ui.mainContent
@@ -136,15 +173,18 @@ func (ui *MainUI) onNavSelected(id string) {
 
 	switch id {
 	case "translate":
-		// Already showing translate view
+		ui.showView(ui.translateView)
 	case "settings":
-		ui.showSettings()
-		// Reset to translate after showing settings
-		ui.sidebar.SetSelected("translate")
+		ui.showView(ui.settingsView)
 	case "dependencies":
-		ui.showDependencyCheck()
-		ui.sidebar.SetSelected("translate")
+		ui.showView(ui.dependenciesView)
 	}
+}
+
+func (ui *MainUI) showView(view fyne.CanvasObject) {
+	ui.contentArea.RemoveAll()
+	ui.contentArea.Add(view)
+	ui.contentArea.Refresh()
 }
 
 func (ui *MainUI) onFileAdded(path string) {
@@ -334,33 +374,6 @@ func (ui *MainUI) translateJobSync(job *models.TranslationJob) {
 			dialog.ShowError(err, ui.window)
 		}
 	})
-}
-
-func (ui *MainUI) showSettings() {
-	settingsDialog := dialogs.NewSettingsDialog(ui.window, ui.config)
-	settingsDialog.OnSave = func(config *models.Config) {
-		ui.config = config
-		ui.pipeline = services.NewPipeline(config)
-		ui.pipeline.SetProgressCallback(func(stage string, percent int, message string) {
-			fyne.Do(func() {
-				if ui.progressPanel != nil {
-					ui.progressPanel.SetProgress(stage, percent)
-					ui.progressPanel.SetStatus(message)
-				}
-			})
-		})
-		ui.progressPanel.SetOutputDirectory(config.OutputDirectory)
-		ui.bottomControls.SetTTSProvider(config.TTSProvider)
-	}
-	settingsDialog.OnTTSChanged = func(provider string) {
-		ui.bottomControls.SetTTSProvider(provider)
-	}
-	settingsDialog.Show()
-}
-
-func (ui *MainUI) showDependencyCheck() {
-	results := ui.pipeline.CheckDependencies()
-	dialogs.ShowDependencyCheck(ui.window, results)
 }
 
 func (ui *MainUI) previewSelectedVoice() {
