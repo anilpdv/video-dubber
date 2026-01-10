@@ -7,8 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	"video-translator/internal/config"
+	"video-translator/internal/logger"
+	"video-translator/internal/media"
+	"video-translator/internal/worker"
 	"video-translator/models"
 )
 
@@ -77,7 +81,7 @@ func (s *EdgeTTSService) SetVoice(voice string) {
 
 // Synthesize generates audio from text using Edge TTS
 func (s *EdgeTTSService) Synthesize(text, outputPath string) error {
-	LogInfo("Edge TTS: voice=%s", s.voice)
+	logger.LogInfo("Edge TTS: voice=%s", s.voice)
 
 	if text == "" {
 		return fmt.Errorf("empty text provided")
@@ -189,21 +193,16 @@ func (s *EdgeTTSService) SynthesizeSubtitles(subs models.SubtitleList, outputPat
 	return s.SynthesizeWithCallback(subs, outputPath, nil)
 }
 
-// edgeTTSJob represents a TTS synthesis job
-type edgeTTSJob struct {
+// edgeJobData contains data for an Edge TTS job.
+type edgeJobData struct {
 	index int
-	sub   models.Subtitle
-}
-
-// edgeTTSResult represents the result of a TTS synthesis job
-type edgeTTSResult struct {
-	index int
-	path  string
-	err   error
+	text  string
+	start time.Duration
+	end   time.Duration
 }
 
 // SynthesizeWithCallback generates audio for subtitles with progress callback
-// Uses parallel processing with 3 workers (like KrillinAI)
+// Uses internal worker pool for parallel processing (Edge TTS is FREE with generous rate limits)
 func (s *EdgeTTSService) SynthesizeWithCallback(
 	subs models.SubtitleList,
 	outputPath string,
@@ -225,158 +224,87 @@ func (s *EdgeTTSService) SynthesizeWithCallback(
 	defer os.RemoveAll(segmentDir)
 
 	// Identify which subtitles need TTS (non-empty text)
-	var ttsJobs []edgeTTSJob
+	var jobs []edgeJobData
 	for i, sub := range subs {
 		if strings.TrimSpace(sub.Text) != "" {
-			ttsJobs = append(ttsJobs, edgeTTSJob{index: i, sub: sub})
+			jobs = append(jobs, edgeJobData{
+				index: i,
+				text:  sub.Text,
+				start: sub.StartTime,
+				end:   sub.EndTime,
+			})
 		}
 	}
 
-	// Process TTS jobs in parallel - Edge TTS is FREE with generous rate limits
-	const maxConcurrency = 10 // Increased from 5 - Edge TTS is FREE with generous rate limits
+	// Process TTS jobs in parallel using internal worker pool
 	speechPaths := make(map[int]string)
-	var speechMutex sync.Mutex
-	var progressCount int
-	var progressMutex sync.Mutex
+	total := len(subs)
 
-	if len(ttsJobs) > 0 {
-		jobs := make(chan edgeTTSJob, len(ttsJobs))
-		results := make(chan edgeTTSResult, len(ttsJobs))
+	if len(jobs) > 0 {
+		// Process function for worker pool
+		processJob := func(job worker.Job[edgeJobData]) (string, error) {
+			data := job.Data
+			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", data.index))
 
-		// Start worker pool
-		var wg sync.WaitGroup
-		numWorkers := maxConcurrency
-		if len(ttsJobs) < numWorkers {
-			numWorkers = len(ttsJobs)
-		}
-
-		for w := 0; w < numWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for job := range jobs {
-					speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", job.index))
-					err := s.synthesizeSingle(job.sub.Text, speechPath)
-
-					// Adjust duration if synthesis succeeded
-					if err == nil {
-						targetDuration := (job.sub.EndTime - job.sub.StartTime).Seconds()
-						if targetDuration > 0.2 {
-							adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", job.index))
-							if adjErr := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); adjErr == nil {
-								speechPath = adjustedPath
-							}
-						}
-					}
-
-					results <- edgeTTSResult{index: job.index, path: speechPath, err: err}
-				}
-			}()
-		}
-
-		// Send jobs to workers
-		go func() {
-			for _, job := range ttsJobs {
-				jobs <- job
+			// Synthesize the text
+			if err := s.synthesizeSingle(data.text, speechPath); err != nil {
+				return "", err
 			}
-			close(jobs)
-		}()
 
-		// Collect results
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
-
-		// Process results as they come in
-		var firstError error
-		for result := range results {
-			if result.err != nil {
-				// Log error but continue - generate silence for failed segments (like KrillinAI)
-				if firstError == nil {
-					firstError = result.err
+			// Adjust duration if needed
+			targetDuration := (data.end - data.start).Seconds()
+			if targetDuration > 0.2 {
+				adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", data.index))
+				if err := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); err == nil {
+					return adjustedPath, nil
 				}
-				// Generate silence instead of failing completely
-				sub := subs[result.index]
-				duration := (sub.EndTime - sub.StartTime).Seconds()
+			}
+
+			return speechPath, nil
+		}
+
+		// Progress callback adapter
+		var progressCallback worker.ProgressFunc
+		if onProgress != nil {
+			progressCallback = func(completed, _ int) {
+				onProgress(completed, total)
+			}
+		}
+
+		// Run worker pool with error tolerance (Edge TTS generates silence for failed segments)
+		results, errors := worker.ProcessWithErrors(jobs, config.WorkersEdgeTTS, processJob, progressCallback)
+
+		// Build speech paths map, using silence for failed jobs
+		ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
+		for i, path := range results {
+			jobData := jobs[i]
+			if errors != nil && i < len(errors) && errors[i] != nil {
+				// Generate silence for failed segment (like KrillinAI behavior)
+				duration := (jobData.end - jobData.start).Seconds()
 				if duration > 0 {
-					silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_fail_%04d.wav", result.index))
-					if silErr := s.ffmpeg.GenerateSilence(duration, silencePath); silErr == nil {
-						speechMutex.Lock()
-						speechPaths[result.index] = silencePath
-						speechMutex.Unlock()
+					silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_fail_%04d.wav", jobData.index))
+					if err := ffmpegMedia.GenerateSilence(duration, silencePath); err == nil {
+						speechPaths[jobData.index] = silencePath
 					}
 				}
-			} else {
-				speechMutex.Lock()
-				speechPaths[result.index] = result.path
-				speechMutex.Unlock()
-			}
-
-			// Report progress
-			if onProgress != nil {
-				progressMutex.Lock()
-				progressCount++
-				onProgress(progressCount, len(subs))
-				progressMutex.Unlock()
+			} else if path != "" {
+				speechPaths[jobData.index] = path
 			}
 		}
 	}
 
-	// Build final segment list in order (silence + speech)
-	var segmentPaths []string
-	var lastEndTime time.Duration
+	// Build final audio using AudioAssembler
+	internalSubs := models.ToInternalSubtitles(subs)
+	ffmpegMediaFinal := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
+	assembler := media.NewAudioAssembler(ffmpegMediaFinal, segmentDir)
 
-	for i, sub := range subs {
-		// Add silence for gap between subtitles
-		if sub.StartTime > lastEndTime {
-			gap := sub.StartTime - lastEndTime
-			if gap > 10*time.Millisecond {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(gap.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence: %w", err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-		}
-
-		// Check if we have speech for this subtitle
-		if speechPath, ok := speechPaths[i]; ok {
-			segmentPaths = append(segmentPaths, speechPath)
-
-			// Pad audio with silence if shorter than window to maintain sync
-			windowDuration := (sub.EndTime - sub.StartTime).Seconds()
-			if actualDuration, err := s.ffmpeg.GetAudioDuration(speechPath); err == nil {
-				if actualDuration < windowDuration-0.05 { // 50ms tolerance
-					paddingDuration := windowDuration - actualDuration
-					paddingPath := filepath.Join(segmentDir, fmt.Sprintf("padding_%04d.wav", i))
-					if err := s.ffmpeg.GenerateSilence(paddingDuration, paddingPath); err == nil {
-						segmentPaths = append(segmentPaths, paddingPath)
-					}
-				}
-			}
-		} else {
-			// Empty subtitle - add silence for the duration
-			duration := sub.EndTime - sub.StartTime
-			if duration > 0 {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_sub_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(duration.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence for empty subtitle %d: %w", i+1, err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-		}
-
-		lastEndTime = sub.EndTime
-	}
-
-	// Concatenate all segments
-	if err := s.ffmpeg.ConcatAudioFiles(segmentPaths, outputPath); err != nil {
-		return fmt.Errorf("failed to concatenate audio: %w", err)
+	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 
 	return nil
 }
+
 
 // synthesizeSingle synthesizes a single text segment with retry
 func (s *EdgeTTSService) synthesizeSingle(text, outputPath string) error {

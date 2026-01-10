@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"video-translator/internal/subtitle"
 )
 
 func TestParseTimestamp(t *testing.T) {
@@ -23,9 +25,9 @@ func TestParseTimestamp(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := parseTimestamp(tt.input)
+		got := subtitle.ParseTimestamp(tt.input)
 		if got != tt.expected {
-			t.Errorf("parseTimestamp(%q) = %v, want %v", tt.input, got, tt.expected)
+			t.Errorf("ParseTimestamp(%q) = %v, want %v", tt.input, got, tt.expected)
 		}
 	}
 }
@@ -38,19 +40,19 @@ func TestParseTimestamp_Invalid(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := parseTimestamp(tt)
+		got := subtitle.ParseTimestamp(tt)
 		if got != 0 {
-			t.Errorf("parseTimestamp(%q) = %v, want 0", tt, got)
+			t.Errorf("ParseTimestamp(%q) = %v, want 0", tt, got)
 		}
 	}
 }
 
 func TestParseTimestamp_ShortFormat(t *testing.T) {
 	// "1:2:3" is valid - parses as 1h 2m 3s
-	got := parseTimestamp("1:2:3")
+	got := subtitle.ParseTimestamp("1:2:3")
 	expected := time.Hour + 2*time.Minute + 3*time.Second
 	if got != expected {
-		t.Errorf("parseTimestamp(%q) = %v, want %v", "1:2:3", got, expected)
+		t.Errorf("ParseTimestamp(%q) = %v, want %v", "1:2:3", got, expected)
 	}
 }
 
@@ -68,9 +70,9 @@ func TestParseTimestampToSeconds(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := parseTimestampToSeconds(tt.input)
+		got := subtitle.ParseTimestampToSeconds(tt.input)
 		if got != tt.expected {
-			t.Errorf("parseTimestampToSeconds(%q) = %v, want %v", tt.input, got, tt.expected)
+			t.Errorf("ParseTimestampToSeconds(%q) = %v, want %v", tt.input, got, tt.expected)
 		}
 	}
 }
@@ -83,9 +85,9 @@ func TestParseTimestampToSeconds_Invalid(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := parseTimestampToSeconds(tt)
+		got := subtitle.ParseTimestampToSeconds(tt)
 		if got != 0 {
-			t.Errorf("parseTimestampToSeconds(%q) = %v, want 0", tt, got)
+			t.Errorf("ParseTimestampToSeconds(%q) = %v, want 0", tt, got)
 		}
 	}
 }
@@ -210,13 +212,13 @@ Third subtitle
 		t.Fatalf("failed to write SRT file: %v", err)
 	}
 
-	subs, err := parseSRTFile(srtPath)
+	subs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
-		t.Fatalf("parseSRTFile() error = %v", err)
+		t.Fatalf("ParseSRTFile() error = %v", err)
 	}
 
 	if len(subs) != 3 {
-		t.Errorf("parseSRTFile() returned %d subtitles, want 3", len(subs))
+		t.Errorf("ParseSRTFile() returned %d subtitles, want 3", len(subs))
 	}
 
 	// Check first subtitle
@@ -243,9 +245,9 @@ Third subtitle
 }
 
 func TestParseSRTFile_NotFound(t *testing.T) {
-	_, err := parseSRTFile("/nonexistent/file.srt")
+	_, err := subtitle.ParseSRTFile("/nonexistent/file.srt")
 	if err == nil {
-		t.Error("parseSRTFile() should return error for nonexistent file")
+		t.Error("ParseSRTFile() should return error for nonexistent file")
 	}
 }
 
@@ -261,13 +263,13 @@ func TestParseSRTFile_Empty(t *testing.T) {
 		t.Fatalf("failed to write SRT file: %v", err)
 	}
 
-	subs, err := parseSRTFile(srtPath)
+	subs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
-		t.Fatalf("parseSRTFile() error = %v", err)
+		t.Fatalf("ParseSRTFile() error = %v", err)
 	}
 
 	if len(subs) != 0 {
-		t.Errorf("parseSRTFile() returned %d subtitles, want 0", len(subs))
+		t.Errorf("ParseSRTFile() returned %d subtitles, want 0", len(subs))
 	}
 }
 
@@ -289,13 +291,13 @@ Test subtitle
 		t.Fatalf("failed to write SRT file: %v", err)
 	}
 
-	subs, err := parseSRTFile(srtPath)
+	subs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
-		t.Fatalf("parseSRTFile() error = %v", err)
+		t.Fatalf("ParseSRTFile() error = %v", err)
 	}
 
 	if len(subs) != 1 {
-		t.Errorf("parseSRTFile() returned %d subtitles, want 1", len(subs))
+		t.Errorf("ParseSRTFile() returned %d subtitles, want 1", len(subs))
 	}
 }
 
@@ -319,13 +321,13 @@ Line three
 		t.Fatalf("failed to write SRT file: %v", err)
 	}
 
-	subs, err := parseSRTFile(srtPath)
+	subs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
-		t.Fatalf("parseSRTFile() error = %v", err)
+		t.Fatalf("ParseSRTFile() error = %v", err)
 	}
 
 	if len(subs) != 1 {
-		t.Fatalf("parseSRTFile() returned %d subtitles, want 1", len(subs))
+		t.Fatalf("ParseSRTFile() returned %d subtitles, want 1", len(subs))
 	}
 
 	// Text should contain all lines

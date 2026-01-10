@@ -1,15 +1,25 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"video-translator/internal/config"
+	"video-translator/internal/logger"
 )
 
 type FFmpegService struct {
 	ffmpegPath string
+}
+
+// newFFmpegCmd creates a new command with timeout context
+func (s *FFmpegService) newCmd(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutFFmpeg)
+	return exec.CommandContext(ctx, s.ffmpegPath, args...), cancel
 }
 
 func NewFFmpegService() *FFmpegService {
@@ -42,7 +52,8 @@ func NewFFmpegServiceWithPath(path string) *FFmpegService {
 
 // CheckInstalled verifies ffmpeg is available
 func (s *FFmpegService) CheckInstalled() error {
-	cmd := exec.Command(s.ffmpegPath, "-version")
+	cmd, cancel := s.newCmd("-version")
+	defer cancel()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg not found at %s: %w", s.ffmpegPath, err)
 	}
@@ -56,7 +67,7 @@ func (s *FFmpegService) GetPath() string {
 
 // ExtractAudio extracts audio from video and converts to WAV format (16kHz mono for Whisper)
 func (s *FFmpegService) ExtractAudio(videoPath, outputPath string) error {
-	LogInfo("FFmpeg: extracting audio → %s", filepath.Base(outputPath))
+	logger.LogInfo("FFmpeg: extracting audio → %s", filepath.Base(outputPath))
 
 	// Ensure output directory exists
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
@@ -74,7 +85,8 @@ func (s *FFmpegService) ExtractAudio(videoPath, outputPath string) error {
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg audio extraction failed: %w\nOutput: %s", err, string(output))
@@ -98,7 +110,8 @@ func (s *FFmpegService) ExtractAudioMP3(videoPath, outputPath string) error {
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg MP3 extraction failed: %w\nOutput: %s", err, string(output))
@@ -109,7 +122,7 @@ func (s *FFmpegService) ExtractAudioMP3(videoPath, outputPath string) error {
 
 // MuxVideoAudio combines video (with original audio removed) and new audio
 func (s *FFmpegService) MuxVideoAudio(videoPath, audioPath, outputPath string) error {
-	LogInfo("FFmpeg: muxing video + audio → %s", filepath.Base(outputPath))
+	logger.LogInfo("FFmpeg: muxing video + audio → %s", filepath.Base(outputPath))
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
@@ -127,7 +140,8 @@ func (s *FFmpegService) MuxVideoAudio(videoPath, audioPath, outputPath string) e
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg muxing failed: %w\nOutput: %s", err, string(output))
@@ -159,7 +173,8 @@ func (s *FFmpegService) MuxVideoAudioWithOriginal(videoPath, audioPath, outputPa
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg muxing with original failed: %w\nOutput: %s", err, string(output))
@@ -180,7 +195,9 @@ func (s *FFmpegService) GetVideoDuration(videoPath string) (float64, error) {
 		videoPath,
 	}
 
-	cmd := exec.Command(ffprobePath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutFFmpeg)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffprobePath, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe failed: %w", err)
@@ -196,7 +213,7 @@ func (s *FFmpegService) GetVideoDuration(videoPath string) (float64, error) {
 
 // ConcatAudioFiles concatenates multiple audio files into one
 func (s *FFmpegService) ConcatAudioFiles(inputPaths []string, outputPath string) error {
-	LogDebug("FFmpeg: concatenating %d audio files", len(inputPaths))
+	logger.LogDebug("FFmpeg: concatenating %d audio files", len(inputPaths))
 
 	if len(inputPaths) == 0 {
 		return fmt.Errorf("no input files provided")
@@ -229,7 +246,8 @@ func (s *FFmpegService) ConcatAudioFiles(inputPaths []string, outputPath string)
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg concat failed: %w\nOutput: %s", err, string(output))
@@ -269,7 +287,7 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 	// Never slow down audio that's shorter - this causes the "slow motion" effect
 	if actualDuration <= targetDuration {
 		// Audio fits within window - just copy without slowing down
-		LogDebug("Audio %.2fs fits in %.2fs window - no adjustment needed", actualDuration, targetDuration)
+		logger.LogDebug("Audio %.2fs fits in %.2fs window - no adjustment needed", actualDuration, targetDuration)
 		input, err := os.ReadFile(inputPath)
 		if err != nil {
 			return err
@@ -285,11 +303,11 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 	// Better to have slight audio overlap than chipmunk speech
 	const maxSpeedUp = 1.3
 	if tempoFactor > maxSpeedUp {
-		LogDebug("Audio %.2fs > %.2fs window - capping speed-up from %.2fx to %.2fx",
+		logger.LogDebug("Audio %.2fs > %.2fs window - capping speed-up from %.2fx to %.2fx",
 			actualDuration, targetDuration, tempoFactor, maxSpeedUp)
 		tempoFactor = maxSpeedUp
 	} else {
-		LogDebug("Audio %.2fs > %.2fs window - speeding up by %.2fx", actualDuration, targetDuration, tempoFactor)
+		logger.LogDebug("Audio %.2fs > %.2fs window - speeding up by %.2fx", actualDuration, targetDuration, tempoFactor)
 	}
 
 	// atempo filter only accepts 0.5-2.0 range
@@ -327,13 +345,14 @@ func (s *FFmpegService) AdjustAudioDuration(inputPath, outputPath string, target
 	// If output would still exceed target (due to speed cap), trim to fit exactly
 	// This prevents audio overflow that causes voice-video sync drift
 	if outputDuration > targetDuration+0.05 { // 50ms tolerance
-		LogDebug("Trimming audio from %.2fs to %.2fs to maintain sync", outputDuration, targetDuration)
+		logger.LogDebug("Trimming audio from %.2fs to %.2fs to maintain sync", outputDuration, targetDuration)
 		args = append(args, "-t", fmt.Sprintf("%.3f", targetDuration))
 	}
 
 	args = append(args, "-y", outputPath)
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg audio adjustment failed: %w\nOutput: %s", err, string(output))
@@ -367,7 +386,8 @@ func (s *FFmpegService) GenerateSilence(duration float64, outputPath string) err
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg silence generation failed: %w\nOutput: %s", err, string(output))
@@ -390,7 +410,8 @@ func (s *FFmpegService) ConvertToWAV(inputPath, outputPath string) error {
 		outputPath,
 	}
 
-	cmd := exec.Command(s.ffmpegPath, args...)
+	cmd, cancel := s.newCmd(args...)
+	defer cancel()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg conversion to WAV failed: %w\nOutput: %s", err, string(output))

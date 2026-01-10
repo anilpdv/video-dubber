@@ -9,26 +9,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"video-translator/internal/config"
+	internalhttp "video-translator/internal/http"
+	"video-translator/internal/logger"
+	"video-translator/internal/text"
 	"video-translator/models"
 )
 
-const (
-	deepSeekEndpoint     = "https://api.deepseek.com/v1/chat/completions"
-	deepSeekModel        = "deepseek-chat"
-	maxTranslateWorkers  = 5  // Increased from 3 for faster parallel translation
-	chunkSize            = 75 // 75 subtitles per batch - fewer API calls
-	maxTranslateRetries  = 3  // retry failed batches
+// Use centralized constants and endpoints
+var (
+	deepSeekEndpoint    = config.DeepSeekAPIEndpoint
+	deepSeekModel       = config.DeepSeekModel
+	maxTranslateWorkers = config.WorkersDeepSeek
+	chunkSize           = config.ChunkSizeDeepSeek
+	maxTranslateRetries = config.DefaultMaxRetries
 )
 
-// Package-level HTTP client with connection pooling (reused across requests)
-var deepseekClient = &http.Client{
-	Timeout: 2 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
+// Use shared HTTP client with connection pooling
+var deepseekClient = internalhttp.DeepSeekClient
 
 // DeepSeekService handles translation via DeepSeek API (10x cheaper than GPT-4o-mini)
 type DeepSeekService struct {
@@ -57,15 +56,14 @@ type translateResult struct {
 }
 
 // TranslateSubtitles translates a list of subtitles using DeepSeek API
-// Uses parallel processing with 3 workers for ~3x speedup
-// Cost: ~$0.05 for 5 hours of subtitles (10x cheaper than GPT-4o-mini)
+// Uses parallel processing with workers for faster translation
+// Deduplicates repeated text to reduce API calls
+// Cost: ~$0.04 for 5 hours of subtitles (10x cheaper than GPT-4o-mini)
 func (s *DeepSeekService) TranslateSubtitles(
 	subs models.SubtitleList,
 	sourceLang, targetLang string,
 	onProgress func(current, total int),
 ) (models.SubtitleList, error) {
-	LogInfo("DeepSeek: translating %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslateWorkers)
-
 	if s.apiKey == "" {
 		return nil, fmt.Errorf("DeepSeek API key is required")
 	}
@@ -83,16 +81,46 @@ func (s *DeepSeekService) TranslateSubtitles(
 			Index:     sub.Index,
 			StartTime: sub.StartTime,
 			EndTime:   sub.EndTime,
-			Text:      sub.Text, // Will be overwritten with translation
+			Text:      sub.Text,
 		}
 	}
 
-	// Create batch jobs
+	// === DEDUPLICATION: Build unique text list ===
+	uniqueTextMap := make(map[string]int) // text -> index in uniqueTexts
+	var uniqueTexts []string
+	subtitleToUnique := make([]int, total) // maps subtitle index -> unique text index
+
+	for i, sub := range subs {
+		text := strings.TrimSpace(sub.Text)
+		if text == "" {
+			subtitleToUnique[i] = -1 // Empty text, skip translation
+			continue
+		}
+		if idx, exists := uniqueTextMap[text]; exists {
+			subtitleToUnique[i] = idx // Reuse existing translation
+		} else {
+			idx := len(uniqueTexts)
+			uniqueTextMap[text] = idx
+			uniqueTexts = append(uniqueTexts, text)
+			subtitleToUnique[i] = idx
+		}
+	}
+
+	uniqueCount := len(uniqueTexts)
+	logger.LogInfo("DeepSeek: %d subtitles → %d unique texts (%d%% dedupe), %d workers",
+		total, uniqueCount, (total-uniqueCount)*100/total, maxTranslateWorkers)
+
+	if uniqueCount == 0 {
+		return translatedSubs, nil
+	}
+
+	// === BATCH TRANSLATION OF UNIQUE TEXTS ===
+	// Create batch jobs for unique texts only
 	var jobs []translateJob
-	for i := 0; i < total; i += chunkSize {
+	for i := 0; i < uniqueCount; i += chunkSize {
 		end := i + chunkSize
-		if end > total {
-			end = total
+		if end > uniqueCount {
+			end = uniqueCount
 		}
 		jobs = append(jobs, translateJob{
 			batchIndex: len(jobs),
@@ -121,11 +149,8 @@ func (s *DeepSeekService) TranslateSubtitles(
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
-				// Collect texts for this batch
-				var textsToTranslate []string
-				for j := job.startIdx; j < job.endIdx; j++ {
-					textsToTranslate = append(textsToTranslate, subs[j].Text)
-				}
+				// Collect unique texts for this batch
+				textsToTranslate := uniqueTexts[job.startIdx:job.endIdx]
 
 				// Translate with retry
 				translated, err := s.translateBatchWithRetry(textsToTranslate, sourceLang, targetLang)
@@ -160,22 +185,35 @@ func (s *DeepSeekService) TranslateSubtitles(
 		}
 		results[result.batchIndex] = result
 
-		// Report progress
+		// Report progress (scale to total subtitles for UI)
 		if onProgress != nil {
 			progressMutex.Lock()
-			completedCount += jobs[result.batchIndex].endIdx - jobs[result.batchIndex].startIdx
-			onProgress(completedCount, total)
+			batchSize := jobs[result.batchIndex].endIdx - jobs[result.batchIndex].startIdx
+			completedCount += batchSize
+			// Scale progress to total subtitle count
+			scaledProgress := (completedCount * total) / uniqueCount
+			onProgress(scaledProgress, total)
 			progressMutex.Unlock()
 		}
 	}
 
-	// Assemble results in order
+	// === BUILD UNIQUE TRANSLATIONS ARRAY ===
+	uniqueTranslations := make([]string, uniqueCount)
 	for batchIdx, job := range jobs {
 		result := results[batchIdx]
-		for j := 0; j < len(result.translated) && job.startIdx+j < total; j++ {
+		for j := 0; j < len(result.translated) && job.startIdx+j < uniqueCount; j++ {
 			idx := job.startIdx + j
-			translatedSubs[idx].Text = cleanTranslation(result.translated[j])
+			uniqueTranslations[idx] = cleanTranslation(result.translated[j])
 		}
+	}
+
+	// === MAP BACK TO ALL SUBTITLES ===
+	for i := 0; i < total; i++ {
+		uniqueIdx := subtitleToUnique[i]
+		if uniqueIdx >= 0 && uniqueIdx < len(uniqueTranslations) {
+			translatedSubs[i].Text = uniqueTranslations[uniqueIdx]
+		}
+		// Empty text subtitles keep their original (empty) text
 	}
 
 	return translatedSubs, nil
@@ -201,22 +239,9 @@ func (s *DeepSeekService) translateBatchWithRetry(texts []string, sourceLang, ta
 
 // translateBatch sends a batch of texts to DeepSeek for translation
 func (s *DeepSeekService) translateBatch(texts []string, sourceLang, targetLang string) ([]string, error) {
-	// Language name mapping
-	langNames := map[string]string{
-		"ru": "Russian", "en": "English", "de": "German", "fr": "French",
-		"es": "Spanish", "it": "Italian", "pt": "Portuguese", "zh": "Chinese",
-		"ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
-		"nl": "Dutch", "pl": "Polish", "tr": "Turkish", "vi": "Vietnamese",
-	}
-
-	srcName := langNames[sourceLang]
-	if srcName == "" {
-		srcName = sourceLang
-	}
-	tgtName := langNames[targetLang]
-	if tgtName == "" {
-		tgtName = targetLang
-	}
+	// Use centralized language mappings from internal/text package
+	srcName := text.GetLanguageName(sourceLang)
+	tgtName := text.GetLanguageName(targetLang)
 
 	// Join texts with delimiter
 	inputText := strings.Join(texts, "\n|||SUBTITLE|||\n")
@@ -236,7 +261,7 @@ Do not add any explanations or extra text.
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.3,
-		"max_tokens":  4096,
+		"max_tokens":  8192, // Increased for larger batches
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -295,16 +320,7 @@ Do not add any explanations or extra text.
 
 	// Split translated text back into individual subtitles
 	translatedText := result.Choices[0].Message.Content
-	translations := strings.Split(translatedText, "|||SUBTITLE|||")
-
-	// Clean up and ensure we have the right number of translations
-	var cleaned []string
-	for _, t := range translations {
-		t = strings.TrimSpace(t)
-		if t != "" {
-			cleaned = append(cleaned, t)
-		}
-	}
+	cleaned := text.SplitByDelimiter(translatedText, "|||SUBTITLE|||")
 
 	// If we don't have enough translations, pad with originals
 	for len(cleaned) < len(texts) {
@@ -314,21 +330,9 @@ Do not add any explanations or extra text.
 	return cleaned[:len(texts)], nil
 }
 
-// cleanTranslation post-processes a translation
-func cleanTranslation(text string) string {
-	text = strings.TrimSpace(text)
-
-	// Capitalize first letter if lowercase
-	if len(text) > 0 && text[0] >= 'a' && text[0] <= 'z' {
-		text = strings.ToUpper(text[:1]) + text[1:]
-	}
-
-	// Remove double spaces
-	for strings.Contains(text, "  ") {
-		text = strings.ReplaceAll(text, "  ", " ")
-	}
-
-	return text
+// cleanTranslation post-processes a translation using internal/text package.
+func cleanTranslation(s string) string {
+	return text.Postprocess(s)
 }
 
 // Translate translates a single text using DeepSeek

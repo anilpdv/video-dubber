@@ -144,11 +144,14 @@ type stageProgressRenderer struct {
 	progressFill  *canvas.Rectangle
 	progressLabel *canvas.Text
 	widget        *StageProgress
+	lastSize      fyne.Size // Store last size for Refresh()
 }
 
 func (r *stageProgressRenderer) Destroy() {}
 
 func (r *stageProgressRenderer) Layout(size fyne.Size) {
+	r.lastSize = size // Store for Refresh()
+
 	padding := float32(16)
 	dotSize := float32(10)
 	connectorHeight := float32(2)
@@ -314,6 +317,17 @@ func (r *stageProgressRenderer) Refresh() {
 	r.progressLabel.Text = formatProgress(r.widget.Progress)
 	r.progressLabel.Color = th.Color(theme.ColorNameForeground, variant)
 	r.progressLabel.Refresh()
+
+	// Update progress fill width (must recalculate on each refresh)
+	if r.lastSize.Width > 0 {
+		padding := float32(16)
+		progressHeight := float32(4)
+		fillWidth := (r.lastSize.Width - padding*2) * float32(r.widget.Progress) / 100
+		if fillWidth < 0 {
+			fillWidth = 0
+		}
+		r.progressFill.Resize(fyne.NewSize(fillWidth, progressHeight))
+	}
 }
 
 func formatProgress(progress int) string {

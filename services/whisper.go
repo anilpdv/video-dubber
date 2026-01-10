@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,10 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
+
+	"video-translator/internal/config"
+	"video-translator/internal/logger"
+	"video-translator/internal/subtitle"
+	"video-translator/internal/text"
 	"video-translator/models"
 )
 
@@ -82,7 +86,7 @@ func (s *WhisperService) CheckModel() error {
 
 // Transcribe converts audio to text with timestamps
 func (s *WhisperService) Transcribe(audioPath, language string) (models.SubtitleList, error) {
-	LogInfo("Whisper: model=%s lang=%s file=%s", filepath.Base(s.modelPath), language, filepath.Base(audioPath))
+	logger.LogInfo("Whisper: model=%s lang=%s file=%s", filepath.Base(s.modelPath), language, filepath.Base(audioPath))
 
 	if err := s.CheckInstalled(); err != nil {
 		return nil, err
@@ -106,19 +110,21 @@ func (s *WhisperService) Transcribe(audioPath, language string) (models.Subtitle
 		"-of", filepath.Join(outputDir, baseName),
 	}
 
-	cmd := exec.Command(s.whisperPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutWhisper)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.whisperPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("whisper transcription failed: %w\nOutput: %s", err, string(output))
 	}
 
-	// Parse the SRT file
-	subtitles, err := parseSRTFile(srtPath)
+	// Parse the SRT file using internal/subtitle package
+	internalSubs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SRT output: %w", err)
 	}
 
-	return subtitles, nil
+	return models.FromInternalSubtitles(internalSubs), nil
 }
 
 // TranscribeWithProgress transcribes audio while reporting progress via callback
@@ -144,7 +150,9 @@ func (s *WhisperService) TranscribeWithProgress(audioPath, language string, audi
 		"-of", filepath.Join(outputDir, baseName),
 	}
 
-	cmd := exec.Command(s.whisperPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutWhisper)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.whisperPath, args...)
 
 	// Get pipes for streaming output
 	stdout, err := cmd.StdoutPipe()
@@ -162,7 +170,7 @@ func (s *WhisperService) TranscribeWithProgress(audioPath, language string, audi
 
 	// Parse timestamps from output in real-time
 	// Whisper outputs: [00:05:00.000 --> 00:05:02.500] text
-	timestampRegex := regexp.MustCompile(`\[(\d{2}:\d{2}:\d{2}\.\d{3})`)
+	// Using pre-compiled regex for performance
 
 	// Read from combined stdout and stderr
 	reader := io.MultiReader(stdout, stderr)
@@ -170,8 +178,8 @@ func (s *WhisperService) TranscribeWithProgress(audioPath, language string, audi
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if matches := timestampRegex.FindStringSubmatch(line); len(matches) > 1 {
-			currentSec := parseTimestampToSeconds(matches[1])
+		if matches := text.WhisperTimestampRegex.FindStringSubmatch(line); len(matches) > 1 {
+			currentSec := subtitle.ParseTimestampToSeconds(matches[1])
 			if audioDuration > 0 && onProgress != nil {
 				// Calculate progress in the 15-40% range (transcription stage)
 				percent := int((currentSec/audioDuration)*25) + 15
@@ -187,19 +195,19 @@ func (s *WhisperService) TranscribeWithProgress(audioPath, language string, audi
 		return nil, fmt.Errorf("whisper transcription failed: %w", err)
 	}
 
-	// Parse the SRT file
-	subtitles, err := parseSRTFile(srtPath)
+	// Parse the SRT file using internal/subtitle package
+	internalSubs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SRT output: %w", err)
 	}
 
-	return subtitles, nil
+	return models.FromInternalSubtitles(internalSubs), nil
 }
 
 // TranscribeWithOpenAI uses OpenAI's Whisper API for fast transcription
 // Cost: $0.006/minute = ~$1.80 for 5 hours of audio
 func (s *WhisperService) TranscribeWithOpenAI(audioPath, apiKey, language string, onProgress func(percent int, message string)) (models.SubtitleList, error) {
-	LogInfo("OpenAI Whisper API: model=whisper-1 lang=%s file=%s", language, filepath.Base(audioPath))
+	logger.LogInfo("OpenAI Whisper API: model=whisper-1 lang=%s file=%s", language, filepath.Base(audioPath))
 
 	if apiKey == "" {
 		return nil, fmt.Errorf("OpenAI API key is required")
@@ -291,11 +299,12 @@ func (s *WhisperService) TranscribeWithOpenAI(audioPath, apiKey, language string
 		onProgress(38, "Parsing transcription...")
 	}
 
-	// Parse SRT response
-	subtitles, err := parseSRTFromString(string(respBody))
+	// Parse SRT response using internal/subtitle package
+	internalSubs, err := subtitle.ParseSRTString(string(respBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SRT response: %w", err)
 	}
+	subtitles := models.FromInternalSubtitles(internalSubs)
 
 	if onProgress != nil {
 		onProgress(40, fmt.Sprintf("Transcribed %d segments", len(subtitles)))
@@ -319,7 +328,9 @@ func (s *WhisperService) transcribeWithOpenAIChunked(audioPath, apiKey, language
 
 	// Use FFmpeg to compress - 64kbps mono should be fine for speech
 	ffmpeg := NewFFmpegService()
-	cmd := exec.Command(ffmpeg.ffmpegPath,
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutFFmpeg)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffmpeg.ffmpegPath,
 		"-i", audioPath,
 		"-ac", "1",        // Mono
 		"-ar", "16000",    // 16kHz
@@ -346,83 +357,6 @@ func (s *WhisperService) transcribeWithOpenAIChunked(audioPath, apiKey, language
 	return s.TranscribeWithOpenAI(compressedPath, apiKey, language, onProgress)
 }
 
-// parseSRTFromString parses SRT content from a string
-func parseSRTFromString(content string) (models.SubtitleList, error) {
-	var subtitles models.SubtitleList
-	lines := strings.Split(content, "\n")
-
-	var currentSub *models.Subtitle
-	lineNum := 0
-	timeRegex := regexp.MustCompile(`(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})`)
-
-	for _, rawLine := range lines {
-		line := strings.TrimSpace(rawLine)
-
-		if line == "" {
-			if currentSub != nil && currentSub.Text != "" {
-				subtitles = append(subtitles, *currentSub)
-			}
-			currentSub = nil
-			lineNum = 0
-			continue
-		}
-
-		lineNum++
-
-		switch lineNum {
-		case 1:
-			// Index line
-			index, err := strconv.Atoi(line)
-			if err == nil {
-				currentSub = &models.Subtitle{Index: index}
-			}
-		case 2:
-			// Timestamp line
-			if currentSub != nil {
-				matches := timeRegex.FindStringSubmatch(line)
-				if len(matches) == 3 {
-					currentSub.StartTime = parseTimestamp(matches[1])
-					currentSub.EndTime = parseTimestamp(matches[2])
-				}
-			}
-		default:
-			// Text lines
-			if currentSub != nil {
-				if currentSub.Text != "" {
-					currentSub.Text += " "
-				}
-				currentSub.Text += line
-			}
-		}
-	}
-
-	// Don't forget the last subtitle
-	if currentSub != nil && currentSub.Text != "" {
-		subtitles = append(subtitles, *currentSub)
-	}
-
-	return subtitles, nil
-}
-
-// parseTimestampToSeconds converts timestamp like "00:05:30.500" to seconds
-func parseTimestampToSeconds(ts string) float64 {
-	parts := strings.Split(ts, ":")
-	if len(parts) != 3 {
-		return 0
-	}
-
-	hours, _ := strconv.ParseFloat(parts[0], 64)
-	minutes, _ := strconv.ParseFloat(parts[1], 64)
-
-	secParts := strings.Split(parts[2], ".")
-	seconds, _ := strconv.ParseFloat(secParts[0], 64)
-	millis := 0.0
-	if len(secParts) > 1 {
-		millis, _ = strconv.ParseFloat("0."+secParts[1], 64)
-	}
-
-	return hours*3600 + minutes*60 + seconds + millis
-}
 
 // TranscribeToText returns just the text without timestamps
 func (s *WhisperService) TranscribeToText(audioPath, language string) (string, error) {
@@ -440,104 +374,6 @@ func (s *WhisperService) TranscribeToText(audioPath, language string) (string, e
 	return strings.TrimSpace(text.String()), nil
 }
 
-// parseSRTFile parses an SRT subtitle file
-func parseSRTFile(path string) (models.SubtitleList, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var subtitles models.SubtitleList
-	scanner := bufio.NewScanner(file)
-
-	// SRT format:
-	// 1
-	// 00:00:00,000 --> 00:00:02,500
-	// Text here
-	//
-	// 2
-	// ...
-
-	var currentSub *models.Subtitle
-	lineNum := 0
-	timeRegex := regexp.MustCompile(`(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})`)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if line == "" {
-			if currentSub != nil && currentSub.Text != "" {
-				subtitles = append(subtitles, *currentSub)
-			}
-			currentSub = nil
-			lineNum = 0
-			continue
-		}
-
-		lineNum++
-
-		switch lineNum {
-		case 1:
-			// Index line
-			index, err := strconv.Atoi(line)
-			if err == nil {
-				currentSub = &models.Subtitle{Index: index}
-			}
-		case 2:
-			// Timestamp line
-			if currentSub != nil {
-				matches := timeRegex.FindStringSubmatch(line)
-				if len(matches) == 3 {
-					currentSub.StartTime = parseTimestamp(matches[1])
-					currentSub.EndTime = parseTimestamp(matches[2])
-				}
-			}
-		default:
-			// Text lines
-			if currentSub != nil {
-				if currentSub.Text != "" {
-					currentSub.Text += " "
-				}
-				currentSub.Text += line
-			}
-		}
-	}
-
-	// Don't forget the last subtitle
-	if currentSub != nil && currentSub.Text != "" {
-		subtitles = append(subtitles, *currentSub)
-	}
-
-	return subtitles, scanner.Err()
-}
-
-// parseTimestamp converts SRT timestamp to time.Duration
-// Format: 00:00:00,000 or 00:00:00.000
-func parseTimestamp(ts string) time.Duration {
-	// Normalize separator
-	ts = strings.Replace(ts, ",", ".", 1)
-
-	parts := strings.Split(ts, ":")
-	if len(parts) != 3 {
-		return 0
-	}
-
-	hours, _ := strconv.Atoi(parts[0])
-	minutes, _ := strconv.Atoi(parts[1])
-
-	secParts := strings.Split(parts[2], ".")
-	seconds, _ := strconv.Atoi(secParts[0])
-	millis := 0
-	if len(secParts) > 1 {
-		millis, _ = strconv.Atoi(secParts[1])
-	}
-
-	return time.Duration(hours)*time.Hour +
-		time.Duration(minutes)*time.Minute +
-		time.Duration(seconds)*time.Second +
-		time.Duration(millis)*time.Millisecond
-}
 
 // GetAvailableModels returns list of available model sizes
 func GetAvailableModels() []string {

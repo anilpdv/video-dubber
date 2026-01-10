@@ -9,26 +9,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	"video-translator/internal/config"
+	internalhttp "video-translator/internal/http"
+	"video-translator/internal/logger"
+	"video-translator/internal/media"
+	"video-translator/internal/worker"
 	"video-translator/models"
 )
 
-// maxTTSWorkers is the number of concurrent TTS API calls
-// Reduced to avoid rate limiting and excessive resource usage
-const maxTTSWorkers = 6 // Increased from 4 - OpenAI can handle more concurrent requests
-
 const openAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
 
-// Package-level HTTP client with connection pooling (reused across requests)
-var openaiTTSClient = &http.Client{
-	Timeout: 1 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
+// Use shared HTTP client with connection pooling
+var openaiTTSClient = internalhttp.OpenAIClient
 
 // OpenAI TTS models
 const (
@@ -105,7 +99,7 @@ func (s *OpenAITTSService) SetModel(model string) {
 
 // Synthesize generates audio from text using OpenAI TTS
 func (s *OpenAITTSService) Synthesize(text, outputPath string) error {
-	LogInfo("OpenAI TTS: model=%s voice=%s speed=%.2f", s.model, s.voice, s.speed)
+	logger.LogInfo("OpenAI TTS: model=%s voice=%s speed=%.2f", s.model, s.voice, s.speed)
 
 	if text == "" {
 		return fmt.Errorf("empty text provided")
@@ -179,7 +173,9 @@ func (s *OpenAITTSService) Synthesize(text, outputPath string) error {
 		os.Remove(mp3Path)
 	} else if outputPath != mp3Path {
 		// Rename MP3 to output path
-		os.Rename(mp3Path, outputPath)
+		if err := os.Rename(mp3Path, outputPath); err != nil {
+			return fmt.Errorf("failed to rename audio file: %w", err)
+		}
 	}
 
 	return nil
@@ -190,21 +186,16 @@ func (s *OpenAITTSService) SynthesizeSubtitles(subs models.SubtitleList, outputP
 	return s.SynthesizeWithCallback(subs, outputPath, nil)
 }
 
-// ttsJob represents a TTS synthesis job
-type ttsJob struct {
+// openaiJobData contains data for an OpenAI TTS job.
+type openaiJobData struct {
 	index int
-	sub   models.Subtitle
-}
-
-// ttsResult represents the result of a TTS synthesis job
-type ttsResult struct {
-	index int
-	path  string
-	err   error
+	text  string
+	start time.Duration
+	end   time.Duration
 }
 
 // SynthesizeWithCallback generates audio for subtitles with progress callback
-// Uses parallel processing with worker pool for 5-10x faster synthesis
+// Uses internal worker pool for parallel processing (5-10x faster synthesis)
 func (s *OpenAITTSService) SynthesizeWithCallback(
 	subs models.SubtitleList,
 	outputPath string,
@@ -226,142 +217,77 @@ func (s *OpenAITTSService) SynthesizeWithCallback(
 	defer os.RemoveAll(segmentDir)
 
 	// Identify which subtitles need TTS (non-empty text)
-	var ttsJobs []ttsJob
+	var jobs []openaiJobData
 	for i, sub := range subs {
 		if strings.TrimSpace(sub.Text) != "" {
-			ttsJobs = append(ttsJobs, ttsJob{index: i, sub: sub})
+			jobs = append(jobs, openaiJobData{
+				index: i,
+				text:  sub.Text,
+				start: sub.StartTime,
+				end:   sub.EndTime,
+			})
 		}
 	}
 
-	// Process TTS jobs in parallel
+	// Process TTS jobs in parallel using internal worker pool
 	speechPaths := make(map[int]string)
-	var speechMutex sync.Mutex
-	var progressCount int
-	var progressMutex sync.Mutex
+	total := len(subs)
 
-	if len(ttsJobs) > 0 {
-		jobs := make(chan ttsJob, len(ttsJobs))
-		results := make(chan ttsResult, len(ttsJobs))
+	if len(jobs) > 0 {
+		// Process function for worker pool
+		processJob := func(job worker.Job[openaiJobData]) (string, error) {
+			data := job.Data
+			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", data.index))
 
-		// Start worker pool
-		var wg sync.WaitGroup
-		numWorkers := maxTTSWorkers
-		if len(ttsJobs) < numWorkers {
-			numWorkers = len(ttsJobs)
-		}
+			// Synthesize the text
+			if err := s.Synthesize(data.text, speechPath); err != nil {
+				return "", err
+			}
 
-		for w := 0; w < numWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for job := range jobs {
-					speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", job.index))
-					err := s.Synthesize(job.sub.Text, speechPath)
-
-					// Adjust duration if synthesis succeeded
-					if err == nil {
-						targetDuration := (job.sub.EndTime - job.sub.StartTime).Seconds()
-						if targetDuration > 0.2 {
-							adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", job.index))
-							if adjErr := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); adjErr == nil {
-								speechPath = adjustedPath
-							}
-						}
-					}
-
-					results <- ttsResult{index: job.index, path: speechPath, err: err}
+			// Adjust duration if needed
+			targetDuration := (data.end - data.start).Seconds()
+			if targetDuration > 0.2 {
+				adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", data.index))
+				if err := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); err == nil {
+					return adjustedPath, nil
 				}
-			}()
+			}
+
+			return speechPath, nil
 		}
 
-		// Send jobs to workers
-		go func() {
-			for _, job := range ttsJobs {
-				jobs <- job
+		// Progress callback adapter
+		var progressCallback worker.ProgressFunc
+		if onProgress != nil {
+			progressCallback = func(completed, _ int) {
+				onProgress(completed, total)
 			}
-			close(jobs)
-		}()
+		}
 
-		// Collect results
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
+		// Run worker pool
+		results, err := worker.Process(jobs, config.WorkersOpenAITTS, processJob, progressCallback)
+		if err != nil {
+			return fmt.Errorf("TTS synthesis failed: %w", err)
+		}
 
-		// Process results as they come in
-		for result := range results {
-			if result.err != nil {
-				return fmt.Errorf("failed to synthesize subtitle %d: %w", result.index+1, result.err)
-			}
-
-			speechMutex.Lock()
-			speechPaths[result.index] = result.path
-			speechMutex.Unlock()
-
-			// Report progress
-			if onProgress != nil {
-				progressMutex.Lock()
-				progressCount++
-				onProgress(progressCount, len(subs))
-				progressMutex.Unlock()
-			}
+		// Collect speech paths by index
+		for i, path := range results {
+			speechPaths[jobs[i].index] = path
 		}
 	}
 
-	// Build final segment list in order (silence + speech)
-	var segmentPaths []string
-	var lastEndTime time.Duration
+	// Build final audio using AudioAssembler
+	internalSubs := models.ToInternalSubtitles(subs)
+	ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
+	assembler := media.NewAudioAssembler(ffmpegMedia, segmentDir)
 
-	for i, sub := range subs {
-		// Add silence for gap between subtitles
-		if sub.StartTime > lastEndTime {
-			gap := sub.StartTime - lastEndTime
-			if gap > 10*time.Millisecond {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(gap.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence: %w", err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-		}
-
-		// Check if we have speech for this subtitle
-		if speechPath, ok := speechPaths[i]; ok {
-			segmentPaths = append(segmentPaths, speechPath)
-
-			// Pad audio with silence if shorter than window to maintain sync
-			windowDuration := (sub.EndTime - sub.StartTime).Seconds()
-			if actualDuration, err := s.ffmpeg.GetAudioDuration(speechPath); err == nil {
-				if actualDuration < windowDuration-0.05 { // 50ms tolerance
-					paddingDuration := windowDuration - actualDuration
-					paddingPath := filepath.Join(segmentDir, fmt.Sprintf("padding_%04d.wav", i))
-					if err := s.ffmpeg.GenerateSilence(paddingDuration, paddingPath); err == nil {
-						segmentPaths = append(segmentPaths, paddingPath)
-					}
-				}
-			}
-		} else {
-			// Empty subtitle - add silence for the duration
-			duration := sub.EndTime - sub.StartTime
-			if duration > 0 {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_sub_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(duration.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence for empty subtitle %d: %w", i+1, err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-		}
-
-		lastEndTime = sub.EndTime
-	}
-
-	// Concatenate all segments
-	if err := s.ffmpeg.ConcatAudioFiles(segmentPaths, outputPath); err != nil {
-		return fmt.Errorf("failed to concatenate audio: %w", err)
+	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 
 	return nil
 }
+
 
 // GetVoices returns the list of available OpenAI TTS voices
 func GetOpenAIVoices() map[string]string {

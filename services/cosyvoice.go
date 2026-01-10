@@ -11,25 +11,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	"video-translator/internal/config"
+	internalhttp "video-translator/internal/http"
+	"video-translator/internal/logger"
+	"video-translator/internal/media"
+	"video-translator/internal/worker"
 	"video-translator/models"
 )
 
-const maxCosyWorkers = 2 // GPU-intensive, keep low
-
-// cosyJob represents a TTS synthesis job
-type cosyJob struct {
+// cosyJobData contains data for a CosyVoice TTS job.
+type cosyJobData struct {
 	index int
 	text  string
-	path  string
-}
-
-// cosyResult contains the result of a synthesis job
-type cosyResult struct {
-	index int
-	path  string
-	err   error
+	start time.Duration
+	end   time.Duration
 }
 
 // CosyVoiceService handles text-to-speech with voice cloning using CosyVoice
@@ -142,7 +139,7 @@ func (s *CosyVoiceService) ExtractVoiceSample(inputPath, outputPath string, star
 
 // Synthesize generates audio from text using CosyVoice with voice cloning
 func (s *CosyVoiceService) Synthesize(text, outputPath string) error {
-	LogInfo("CosyVoice: mode=%s sample=%s", s.mode, s.voiceSamplePath)
+	logger.LogInfo("CosyVoice: mode=%s sample=%s", s.mode, s.voiceSamplePath)
 
 	if text == "" {
 		return fmt.Errorf("empty text provided")
@@ -230,15 +227,14 @@ func (s *CosyVoiceService) synthesizeViaAPI(text, outputPath string) error {
 
 	writer.Close()
 
-	// Make request
+	// Make request using shared HTTP client
 	req, err := http.NewRequest("POST", s.apiURL+"/synthesize", &body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := internalhttp.CosyVoiceClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("API request failed: %w", err)
 	}
@@ -273,13 +269,14 @@ func (s *CosyVoiceService) SynthesizeSubtitles(subs models.SubtitleList, outputP
 	return s.SynthesizeWithCallback(subs, outputPath, nil)
 }
 
-// SynthesizeWithCallback generates audio for subtitles with parallel workers (KrillinAI pattern)
+// SynthesizeWithCallback generates audio for subtitles with progress callback
+// Uses internal worker pool for parallel processing (GPU-intensive, keep workers low)
 func (s *CosyVoiceService) SynthesizeWithCallback(
 	subs models.SubtitleList,
 	outputPath string,
 	onProgress func(current, total int),
 ) error {
-	LogInfo("CosyVoice: synthesizing %d subtitles with %d workers", len(subs), maxCosyWorkers)
+	logger.LogInfo("CosyVoice: synthesizing %d subtitles with %d workers", len(subs), config.WorkersCosyVoice)
 
 	if len(subs) == 0 {
 		return fmt.Errorf("no subtitles provided")
@@ -300,129 +297,78 @@ func (s *CosyVoiceService) SynthesizeWithCallback(
 	}
 	defer os.RemoveAll(segmentDir)
 
-	// Pre-calculate all synthesis jobs (only non-empty text)
-	var jobs []cosyJob
+	// Identify which subtitles need TTS (non-empty text)
+	var jobs []cosyJobData
 	for i, sub := range subs {
 		if strings.TrimSpace(sub.Text) != "" {
-			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", i))
-			jobs = append(jobs, cosyJob{index: i, text: sub.Text, path: speechPath})
+			jobs = append(jobs, cosyJobData{
+				index: i,
+				text:  sub.Text,
+				start: sub.StartTime,
+				end:   sub.EndTime,
+			})
 		}
 	}
 
-	// Parallel synthesis of all speech segments
+	// Process TTS jobs in parallel using internal worker pool
 	speechPaths := make(map[int]string)
-	var mu sync.Mutex
-	var firstErr error
+	total := len(subs)
 
 	if len(jobs) > 0 {
-		jobChan := make(chan cosyJob, len(jobs))
-		resultChan := make(chan cosyResult, len(jobs))
+		// Process function for worker pool
+		processJob := func(job worker.Job[cosyJobData]) (string, error) {
+			data := job.Data
+			speechPath := filepath.Join(segmentDir, fmt.Sprintf("speech_%04d.wav", data.index))
 
-		// Start worker pool
-		var wg sync.WaitGroup
-		for w := 0; w < maxCosyWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for job := range jobChan {
-					err := s.Synthesize(job.text, job.path)
-					resultChan <- cosyResult{index: job.index, path: job.path, err: err}
+			// Synthesize the text
+			if err := s.Synthesize(data.text, speechPath); err != nil {
+				return "", err
+			}
+
+			// Adjust duration if needed
+			targetDuration := (data.end - data.start).Seconds()
+			if targetDuration > 0.2 {
+				adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", data.index))
+				if err := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); err == nil {
+					return adjustedPath, nil
 				}
-			}()
+			}
+
+			return speechPath, nil
 		}
 
-		// Send jobs
-		for _, job := range jobs {
-			jobChan <- job
-		}
-		close(jobChan)
-
-		// Close results when workers done
-		go func() {
-			wg.Wait()
-			close(resultChan)
-		}()
-
-		// Collect results
-		completed := 0
-		for result := range resultChan {
-			if result.err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("failed to synthesize subtitle %d: %w", result.index+1, result.err)
-				continue
-			}
-			if result.err == nil {
-				mu.Lock()
-				speechPaths[result.index] = result.path
-				mu.Unlock()
-			}
-			completed++
-			if onProgress != nil {
-				onProgress(completed, len(jobs))
+		// Progress callback adapter
+		var progressCallback worker.ProgressFunc
+		if onProgress != nil {
+			progressCallback = func(completed, _ int) {
+				onProgress(completed, total)
 			}
 		}
 
-		if firstErr != nil {
-			return firstErr
+		// Run worker pool
+		results, err := worker.Process(jobs, config.WorkersCosyVoice, processJob, progressCallback)
+		if err != nil {
+			return fmt.Errorf("TTS synthesis failed: %w", err)
+		}
+
+		// Collect speech paths by index
+		for i, path := range results {
+			speechPaths[jobs[i].index] = path
 		}
 	}
 
-	// Sequential assembly with silence gaps (must maintain order)
-	var segmentPaths []string
-	var lastEndTime time.Duration
+	// Build final audio using AudioAssembler
+	internalSubs := models.ToInternalSubtitles(subs)
+	ffmpegMedia := media.NewFFmpegServiceWithPath(s.ffmpeg.GetPath())
+	assembler := media.NewAudioAssembler(ffmpegMedia, segmentDir)
 
-	for i, sub := range subs {
-		// Add silence for gap between subtitles
-		if sub.StartTime > lastEndTime {
-			gap := sub.StartTime - lastEndTime
-			if gap > 10*time.Millisecond {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(gap.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence: %w", err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-		}
-
-		// Handle empty text - just add silence
-		if strings.TrimSpace(sub.Text) == "" {
-			duration := sub.EndTime - sub.StartTime
-			if duration > 0 {
-				silencePath := filepath.Join(segmentDir, fmt.Sprintf("silence_sub_%04d.wav", i))
-				if err := s.ffmpeg.GenerateSilence(duration.Seconds(), silencePath); err != nil {
-					return fmt.Errorf("failed to generate silence for empty subtitle %d: %w", i+1, err)
-				}
-				segmentPaths = append(segmentPaths, silencePath)
-			}
-			lastEndTime = sub.EndTime
-			continue
-		}
-
-		// Use pre-generated speech
-		speechPath, ok := speechPaths[i]
-		if !ok {
-			return fmt.Errorf("missing speech for subtitle %d", i+1)
-		}
-
-		// Adjust speech duration to match subtitle timing
-		targetDuration := (sub.EndTime - sub.StartTime).Seconds()
-		if targetDuration > 0.2 {
-			adjustedPath := filepath.Join(segmentDir, fmt.Sprintf("adjusted_%04d.wav", i))
-			if err := s.ffmpeg.AdjustAudioDuration(speechPath, adjustedPath, targetDuration); err == nil {
-				speechPath = adjustedPath
-			}
-		}
-
-		segmentPaths = append(segmentPaths, speechPath)
-		lastEndTime = sub.EndTime
-	}
-
-	// Concatenate all segments
-	if err := s.ffmpeg.ConcatAudioFiles(segmentPaths, outputPath); err != nil {
-		return fmt.Errorf("failed to concatenate audio: %w", err)
+	if err := assembler.AssembleFromSpeechPaths(internalSubs, speechPaths, outputPath); err != nil {
+		return fmt.Errorf("failed to assemble audio: %w", err)
 	}
 
 	return nil
 }
+
 
 // GetVoiceSamplePath returns the current voice sample path
 func (s *CosyVoiceService) GetVoiceSamplePath() string {

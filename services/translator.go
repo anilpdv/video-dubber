@@ -2,35 +2,32 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
+
+	"video-translator/internal/config"
+	internalhttp "video-translator/internal/http"
+	"video-translator/internal/logger"
+	textutil "video-translator/internal/text"
 	"video-translator/models"
 )
 
-// Constants for translation
-const (
-	openAITranslateRetries  = 3 // Number of retry attempts for API calls
-	maxTranslationWorkers   = 4 // KrillinAI pattern: parallel workers for batch translation
-	openAITranslationChunk  = 50
+// Use centralized constants from internal/config
+var (
+	openAITranslateRetries  = config.DefaultMaxRetries
+	maxTranslationWorkers   = config.WorkersOpenAI
+	openAITranslationChunk  = config.ChunkSizeOpenAI
 )
 
-// Package-level HTTP client with connection pooling for OpenAI translation
-var openaiTranslatorClient = &http.Client{
-	Timeout: 2 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
+// Use shared HTTP client with connection pooling
+var openaiTranslatorClient = internalhttp.OpenAIClient
 
 // translationJob represents a batch of texts to translate
 type translationJob struct {
@@ -75,8 +72,11 @@ func findPythonWithArgos() string {
 	}
 
 	for _, p := range pythonPaths {
-		cmd := exec.Command(p, "-c", "import argostranslate.translate; print('ok')")
-		if output, err := cmd.Output(); err == nil && strings.TrimSpace(string(output)) == "ok" {
+		ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+		cmd := exec.CommandContext(ctx, p, "-c", "import argostranslate.translate; print('ok')")
+		output, err := cmd.Output()
+		cancel()
+		if err == nil && strings.TrimSpace(string(output)) == "ok" {
 			return p
 		}
 	}
@@ -91,7 +91,9 @@ func (s *TranslatorService) CheckInstalled() error {
 import argostranslate.translate
 print("ok")
 `
-	cmd := exec.Command(s.pythonPath, "-c", script)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.pythonPath, "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("argos translate not installed. Run: pip install argostranslate\nError: %s", string(output))
@@ -116,7 +118,9 @@ else:
         print("missing")
 `, sourceLang, targetLang)
 
-	cmd := exec.Command(s.pythonPath, "-c", script)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.pythonPath, "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to check language package: %w", err)
@@ -136,15 +140,13 @@ func (s *TranslatorService) Translate(text, sourceLang, targetLang string) (stri
 	}
 
 	// Preprocess text for better translation quality
-	text = preprocessText(text)
+	text = textutil.Preprocess(text)
 	if text == "" {
 		return "", nil
 	}
 
-	// Escape text for Python
-	escapedText := strings.ReplaceAll(text, "\\", "\\\\")
-	escapedText = strings.ReplaceAll(escapedText, "'", "\\'")
-	escapedText = strings.ReplaceAll(escapedText, "\n", "\\n")
+	// Escape text for Python using optimized single-pass function
+	escapedText := textutil.EscapeForPython(text)
 
 	script := fmt.Sprintf(`
 import argostranslate.translate
@@ -152,14 +154,16 @@ result = argostranslate.translate.translate('%s', '%s', '%s')
 print(result)
 `, escapedText, sourceLang, targetLang)
 
-	cmd := exec.Command(s.pythonPath, "-c", script)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.pythonPath, "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("translation failed: %w\nOutput: %s", err, string(output))
 	}
 
 	// Postprocess translated text for better quality
-	result := postprocessTranslation(strings.TrimSpace(string(output)))
+	result := textutil.Postprocess(strings.TrimSpace(string(output)))
 	return result, nil
 }
 
@@ -168,10 +172,8 @@ func (s *TranslatorService) TranslateSubtitles(subs models.SubtitleList, sourceL
 	return s.TranslateSubtitlesWithProgress(subs, sourceLang, targetLang, nil)
 }
 
-// translationChunkSize defines how many subtitles to translate in each batch
-// Larger chunks = fewer Python process startups = faster overall
-// 50 subtitles per batch reduces Python overhead by 5x compared to 10
-const translationChunkSize = 50
+// translationChunkSize uses centralized config for batch size.
+var translationChunkSize = config.ChunkSizeArgos
 
 // TranslateSubtitlesWithProgress translates subtitles with parallel workers (KrillinAI pattern)
 // Uses worker pool for 3-4x faster translation
@@ -180,7 +182,7 @@ func (s *TranslatorService) TranslateSubtitlesWithProgress(
 	sourceLang, targetLang string,
 	onProgress func(current, total int),
 ) (models.SubtitleList, error) {
-	LogInfo("Argos Translate: %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslationWorkers)
+	logger.LogInfo("Argos Translate: %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslationWorkers)
 
 	if len(subs) == 0 {
 		return subs, nil
@@ -278,38 +280,10 @@ func (s *TranslatorService) TranslateSubtitlesWithProgress(
 	return translatedSubs, nil
 }
 
-// translateIndividualWithProgress falls back to translating one subtitle at a time with progress
-func (s *TranslatorService) translateIndividualWithProgress(
-	subs models.SubtitleList,
-	sourceLang, targetLang string,
-	onProgress func(current, total int),
-) (models.SubtitleList, error) {
-	translatedSubs := make(models.SubtitleList, len(subs))
-
-	for i, sub := range subs {
-		translated, err := s.Translate(sub.Text, sourceLang, targetLang)
-		if err != nil {
-			return nil, fmt.Errorf("failed to translate subtitle %d: %w", i+1, err)
-		}
-
-		translatedSubs[i] = models.Subtitle{
-			Index:     sub.Index,
-			StartTime: sub.StartTime,
-			EndTime:   sub.EndTime,
-			Text:      translated,
-		}
-		if onProgress != nil {
-			onProgress(i+1, len(subs))
-		}
-	}
-
-	return translatedSubs, nil
-}
-
 // TranslateWithOpenAI uses GPT-4o-mini for fast, high-quality translation with parallel workers
 // Cost: ~$0.50 for 5 hours of subtitles
 func (s *TranslatorService) TranslateWithOpenAI(subs models.SubtitleList, sourceLang, targetLang, apiKey string, onProgress func(current, total int)) (models.SubtitleList, error) {
-	LogInfo("OpenAI Translation: model=gpt-4o-mini %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslationWorkers)
+	logger.LogInfo("OpenAI Translation: model=gpt-4o-mini %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslationWorkers)
 
 	if apiKey == "" {
 		return nil, fmt.Errorf("OpenAI API key is required")
@@ -404,7 +378,7 @@ func (s *TranslatorService) TranslateWithOpenAI(subs models.SubtitleList, source
 					Index:     subs[idx].Index,
 					StartTime: subs[idx].StartTime,
 					EndTime:   subs[idx].EndTime,
-					Text:      postprocessTranslation(text),
+					Text:      textutil.Postprocess(text),
 				}
 			}
 		}
@@ -415,21 +389,9 @@ func (s *TranslatorService) TranslateWithOpenAI(subs models.SubtitleList, source
 
 // translateBatchWithOpenAI sends a batch of texts to GPT-4o-mini for translation
 func (s *TranslatorService) translateBatchWithOpenAI(texts []string, sourceLang, targetLang, apiKey string) ([]string, error) {
-	// Build the prompt
-	langNames := map[string]string{
-		"ru": "Russian", "en": "English", "de": "German", "fr": "French",
-		"es": "Spanish", "it": "Italian", "pt": "Portuguese", "zh": "Chinese",
-		"ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
-	}
-
-	srcName := langNames[sourceLang]
-	if srcName == "" {
-		srcName = sourceLang
-	}
-	tgtName := langNames[targetLang]
-	if tgtName == "" {
-		tgtName = targetLang
-	}
+	// Use centralized language mappings from internal/text package
+	srcName := textutil.GetLanguageName(sourceLang)
+	tgtName := textutil.GetLanguageName(targetLang)
 
 	// Join texts with delimiter
 	inputText := strings.Join(texts, "\n|||SUBTITLE|||\n")
@@ -555,7 +517,7 @@ func (s *TranslatorService) TranslateBatch(texts []string, sourceLang, targetLan
 	// Preprocess all texts before translation
 	processedTexts := make([]string, len(texts))
 	for i, text := range texts {
-		processedTexts[i] = preprocessText(text)
+		processedTexts[i] = textutil.Preprocess(text)
 	}
 
 	// Create a Python script that translates all texts
@@ -563,29 +525,25 @@ func (s *TranslatorService) TranslateBatch(texts []string, sourceLang, targetLan
 	builder.WriteString("import argostranslate.translate\n")
 	builder.WriteString("texts = [\n")
 	for _, text := range processedTexts {
-		escaped := strings.ReplaceAll(text, "\\", "\\\\")
-		escaped = strings.ReplaceAll(escaped, "'", "\\'")
-		escaped = strings.ReplaceAll(escaped, "\n", "\\n")
+		escaped := textutil.EscapeForPython(text)
 		builder.WriteString(fmt.Sprintf("    '%s',\n", escaped))
 	}
 	builder.WriteString("]\n")
 	builder.WriteString(fmt.Sprintf("for t in texts:\n    print(argostranslate.translate.translate(t, '%s', '%s'))\n    print('---SEPARATOR---')\n", sourceLang, targetLang))
 
-	cmd := exec.Command(s.pythonPath, "-c", builder.String())
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.pythonPath, "-c", builder.String())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("batch translation failed: %w\nOutput: %s", err, string(output))
 	}
 
 	// Parse results and postprocess
-	results := strings.Split(string(output), "---SEPARATOR---\n")
-	translated := make([]string, 0, len(texts))
+	results := textutil.SplitByDelimiter(string(output), "---SEPARATOR---\n")
+	translated := make([]string, 0, len(results))
 	for _, r := range results {
-		r = strings.TrimSpace(r)
-		if r != "" {
-			// Postprocess each translated text
-			translated = append(translated, postprocessTranslation(r))
-		}
+		translated = append(translated, textutil.Postprocess(r))
 	}
 
 	if len(translated) != len(texts) {
@@ -603,40 +561,16 @@ func (s *TranslatorService) TranslateBatch(texts []string, sourceLang, targetLan
 	return translated, nil
 }
 
-// GetSupportedLanguages returns languages supported by Argos Translate
+// GetSupportedSourceLanguages returns languages supported by Argos Translate.
+// Uses centralized language definitions from internal/text package.
 func GetSupportedSourceLanguages() map[string]string {
-	return map[string]string{
-		"ru": "Russian",
-		"en": "English",
-		"de": "German",
-		"fr": "French",
-		"es": "Spanish",
-		"it": "Italian",
-		"pt": "Portuguese",
-		"nl": "Dutch",
-		"pl": "Polish",
-		"ja": "Japanese",
-		"zh": "Chinese",
-		"ko": "Korean",
-		"ar": "Arabic",
-		"hi": "Hindi",
-	}
+	return textutil.SupportedSourceLanguages
 }
 
+// GetSupportedTargetLanguages returns languages for translation output.
+// Uses centralized language definitions from internal/text package.
 func GetSupportedTargetLanguages() map[string]string {
-	return map[string]string{
-		"en": "English",
-		"de": "German",
-		"fr": "French",
-		"es": "Spanish",
-		"it": "Italian",
-		"pt": "Portuguese",
-		"nl": "Dutch",
-		"pl": "Polish",
-		"ja": "Japanese",
-		"zh": "Chinese",
-		"ru": "Russian",
-	}
+	return textutil.SupportedTargetLanguages
 }
 
 // InstallLanguagePackage installs a language package
@@ -653,7 +587,9 @@ else:
     print("not_found")
 `, sourceLang, targetLang)
 
-	cmd := exec.Command(s.pythonPath, "-c", script)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ExecTimeoutPython)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.pythonPath, "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install language package: %w\nOutput: %s", err, string(output))
@@ -666,65 +602,3 @@ else:
 	return nil
 }
 
-// preprocessText cleans up text before translation for better accuracy
-func preprocessText(text string) string {
-	if text == "" {
-		return ""
-	}
-
-	// Remove common filler sounds/words that don't translate well
-	fillerRegex := regexp.MustCompile(`(?i)\b(uh|um|er|ah|hmm|erm)\b`)
-	text = fillerRegex.ReplaceAllString(text, "")
-
-	// Normalize whitespace (multiple spaces, tabs, etc. to single space)
-	whitespaceRegex := regexp.MustCompile(`\s+`)
-	text = whitespaceRegex.ReplaceAllString(text, " ")
-
-	// Remove leading/trailing whitespace
-	text = strings.TrimSpace(text)
-
-	// Simplify repeated punctuation (e.g., "..." or "!!!" to single)
-	// Go regex doesn't support backreferences, so handle common cases
-	text = regexp.MustCompile(`\.{2,}`).ReplaceAllString(text, ".")
-	text = regexp.MustCompile(`!{2,}`).ReplaceAllString(text, "!")
-	text = regexp.MustCompile(`\?{2,}`).ReplaceAllString(text, "?")
-	text = regexp.MustCompile(`,{2,}`).ReplaceAllString(text, ",")
-
-	return text
-}
-
-// postprocessTranslation cleans up translated text for better quality
-func postprocessTranslation(text string) string {
-	if text == "" {
-		return ""
-	}
-
-	// Trim whitespace
-	text = strings.TrimSpace(text)
-
-	// Capitalize first letter if it's lowercase
-	if len(text) > 0 {
-		runes := []rune(text)
-		if unicode.IsLower(runes[0]) {
-			runes[0] = unicode.ToUpper(runes[0])
-			text = string(runes)
-		}
-	}
-
-	// Remove any double spaces that might have been introduced
-	whitespaceRegex := regexp.MustCompile(`\s+`)
-	text = whitespaceRegex.ReplaceAllString(text, " ")
-
-	// Ensure sentence ends with proper punctuation
-	if len(text) > 0 {
-		lastChar := text[len(text)-1]
-		if lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ',' {
-			// Don't add punctuation if it's clearly a fragment or already has some
-			if !strings.HasSuffix(text, "...") && !strings.HasSuffix(text, "-") {
-				// text = text + "." // Optionally add period
-			}
-		}
-	}
-
-	return text
-}

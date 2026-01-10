@@ -3,13 +3,16 @@ package services
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
-	"time"
+
+	"video-translator/internal/logger"
+	"video-translator/internal/subtitle"
+	"video-translator/internal/text"
 	"video-translator/models"
 )
 
@@ -82,7 +85,7 @@ func (s *FasterWhisperService) TranscribeWithProgress(
 	audioDuration float64,
 	onProgress func(currentSec float64, percent int),
 ) (models.SubtitleList, error) {
-	LogInfo("FasterWhisper: model=%s device=%s lang=%s file=%s", s.model, s.device, language, filepath.Base(audioPath))
+	logger.LogInfo("FasterWhisper: model=%s device=%s lang=%s file=%s", s.model, s.device, language, filepath.Base(audioPath))
 
 	if err := s.CheckInstalled(); err != nil {
 		return nil, err
@@ -140,7 +143,11 @@ print("DONE", file=sys.stderr, flush=True)
 
 	cmd := exec.Command(s.pythonPath, "-c", script)
 
-	// Get stderr for progress
+	// Get stdout and stderr pipes
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stderr pipe: %w", err)
@@ -150,13 +157,18 @@ print("DONE", file=sys.stderr, flush=True)
 		return nil, fmt.Errorf("failed to start faster-whisper: %w", err)
 	}
 
-	// Read progress from stderr
-	progressRegex := regexp.MustCompile(`PROGRESS:(\d+\.?\d*)`)
+	// Drain stdout to prevent blocking
+	go io.Copy(io.Discard, stdout)
+
+	// Read stderr and capture all output for debugging
+	var stderrLines []string
 	scanner := bufio.NewScanner(stderr)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if matches := progressRegex.FindStringSubmatch(line); len(matches) > 1 {
+		stderrLines = append(stderrLines, line)
+
+		if matches := text.WhisperProgressRegex.FindStringSubmatch(line); len(matches) > 1 {
 			currentSec, _ := strconv.ParseFloat(matches[1], 64)
 			if audioDuration > 0 && onProgress != nil {
 				percent := int((currentSec / audioDuration) * 25) + 15
@@ -169,11 +181,18 @@ print("DONE", file=sys.stderr, flush=True)
 	}
 
 	if err := cmd.Wait(); err != nil {
+		logger.LogError("faster-whisper failed. Output:\n%s", strings.Join(stderrLines, "\n"))
 		return nil, fmt.Errorf("faster-whisper transcription failed: %w", err)
 	}
 
-	// Parse the SRT file
-	subtitles, err := parseSRTFile(srtPath)
+	// Verify SRT file was created
+	if _, err := os.Stat(srtPath); os.IsNotExist(err) {
+		logger.LogError("faster-whisper did not create SRT file. Output:\n%s", strings.Join(stderrLines, "\n"))
+		return nil, fmt.Errorf("faster-whisper did not create SRT output file at %s", srtPath)
+	}
+
+	// Parse the SRT file using internal/subtitle package
+	internalSubs, err := subtitle.ParseSRTFile(srtPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse SRT output: %w", err)
 	}
@@ -181,7 +200,7 @@ print("DONE", file=sys.stderr, flush=True)
 	// Clean up the temporary SRT file
 	os.Remove(srtPath)
 
-	return subtitles, nil
+	return models.FromInternalSubtitles(internalSubs), nil
 }
 
 // TranscribeToText transcribes audio to plain text (no timestamps)
@@ -197,46 +216,4 @@ func (s *FasterWhisperService) TranscribeToText(audioPath, language string) (str
 	}
 
 	return strings.Join(texts, " "), nil
-}
-
-// SetModel sets the whisper model to use
-func (s *FasterWhisperService) SetModel(model string) {
-	s.model = model
-}
-
-// SetDevice sets the compute device (auto, cuda, cpu)
-func (s *FasterWhisperService) SetDevice(device string) {
-	s.device = device
-}
-
-// GetDeviceInfo returns information about available compute devices
-func (s *FasterWhisperService) GetDeviceInfo() (string, error) {
-	script := `
-import sys
-try:
-    import torch
-    if torch.cuda.is_available():
-        print(f"CUDA available: {torch.cuda.get_device_name(0)}")
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        print("MPS (Apple Silicon) available")
-    else:
-        print("CPU only")
-except ImportError:
-    print("PyTorch not installed, CPU only")
-`
-	cmd := exec.Command(s.pythonPath, "-c", script)
-	output, err := cmd.Output()
-	if err != nil {
-		return "Unknown", err
-	}
-	return strings.TrimSpace(string(output)), nil
-}
-
-// EstimateTime estimates processing time based on audio duration
-func (s *FasterWhisperService) EstimateTime(audioDuration float64) time.Duration {
-	// FasterWhisper is roughly 4-10x faster than whisper.cpp
-	// With GPU (CUDA): ~10x faster than real-time
-	// With CPU: ~2-4x faster than real-time
-	// Conservative estimate: audio duration / 5
-	return time.Duration(audioDuration/5) * time.Second
 }

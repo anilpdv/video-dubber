@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 
+	"video-translator/internal/logger"
 	"video-translator/models"
 	"video-translator/services"
 	uicontainer "video-translator/ui/container"
@@ -365,7 +366,7 @@ func (ui *MainUI) previewSelectedVoice() {
 	provider := ui.bottomControls.GetTTSProvider()
 	sampleText := "This is a preview of the selected voice."
 
-	services.LogInfo("Preview: provider=%s voice=%s", provider, voice)
+	logger.LogInfo("Preview: provider=%s voice=%s", provider, voice)
 
 	ui.progressPanel.SetStatus(fmt.Sprintf("Generating: %s (%s)", voice, provider))
 
