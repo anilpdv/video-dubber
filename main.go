@@ -2,6 +2,7 @@ package main
 
 import (
 	"video-translator/ui"
+	"video-translator/ui/theme"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -9,10 +10,10 @@ import (
 
 func main() {
 	a := app.New()
-	a.Settings().SetTheme(&ui.TranslatorTheme{})
+	a.Settings().SetTheme(&theme.VideoTranslatorTheme{})
 
 	w := a.NewWindow("Video Translator")
-	w.Resize(fyne.NewSize(1000, 700))
+	w.Resize(fyne.NewSize(1100, 750))
 
 	mainUI := ui.NewMainUI(w)
 	w.SetContent(mainUI.Build())
