@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"video-translator/models"
+	"video-translator/services"
 	"video-translator/ui/widgets"
 )
 
@@ -23,13 +24,11 @@ type SettingsPanel struct {
 	config *models.Config
 
 	// UI elements
-	outputDirEntry            *widget.Entry
-	transcriptionSelect       *widget.Select
-	translationSelect         *widget.Select
-	ttsSelect                 *widget.Select
-	fasterWhisperModelSelect  *widget.Select
-	fasterWhisperDeviceSelect *widget.Select
-	openaiTTSModelSelect      *widget.Select
+	outputDirEntry       *widget.Entry
+	transcriptionSelect  *widget.Select
+	translationSelect    *widget.Select
+	ttsSelect            *widget.Select
+	openaiTTSModelSelect *widget.Select
 	cosyVoiceModeSelect       *widget.Select
 	cosyVoiceAPIURLEntry      *widget.Entry
 	voiceSamplePathEntry      *widget.Entry
@@ -43,7 +42,10 @@ type SettingsPanel struct {
 	backgroundVolumeLabel    *widget.Label
 
 	// Conditional containers
-	fasterWhisperSettings *fyne.Container
+	whisperKitSettings    *fyne.Container
+	whisperKitModelSelect *widget.Select
+	whisperKitModelStatus *widget.Label
+	whisperKitDownloadBtn *widget.Button
 	openaiTTSSettings     *fyne.Container
 	cosyVoiceSettings     *fyne.Container
 
@@ -88,14 +90,14 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 
 	// Provider selections with min height
 	p.transcriptionSelect = widget.NewSelect([]string{
-		"whisper-cpp",
-		"faster-whisper",
+		"whisperkit",  // Native macOS (recommended for Apple Silicon)
+		"whisper-cpp", // Cross-platform fallback
 		"openai",
 		"groq",
 	}, func(value string) {
 		p.updateConditionalUI()
 	})
-	p.transcriptionSelect.SetSelected(getOrDefault(p.config.TranscriptionProvider, "whisper-cpp"))
+	p.transcriptionSelect.SetSelected(getOrDefault(p.config.TranscriptionProvider, "whisperkit"))
 
 	p.translationSelect = widget.NewSelect([]string{
 		"argos",
@@ -124,25 +126,61 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		return container.NewStack(spacer, w)
 	}
 
-	// FasterWhisper settings
-	p.fasterWhisperModelSelect = widget.NewSelect([]string{
-		"tiny", "base", "small", "medium", "large-v2", "large-v3",
-	}, nil)
-	p.fasterWhisperModelSelect.SetSelected(getOrDefault(p.config.FasterWhisperModel, "base"))
+	// WhisperKit settings (shown when whisperkit is selected)
+	// Model sizes for info display
+	modelSizes := map[string]string{
+		"tiny":     "~75MB - Fastest",
+		"base":     "~150MB - Balanced",
+		"small":    "~500MB - Better quality",
+		"medium":   "~1.5GB - High quality",
+		"large-v2": "~3GB - Best quality",
+		"large-v3": "~3GB - Latest",
+	}
 
-	p.fasterWhisperDeviceSelect = widget.NewSelect([]string{
-		"auto", "cuda", "cpu",
-	}, nil)
-	p.fasterWhisperDeviceSelect.SetSelected(getOrDefault(p.config.FasterWhisperDevice, "auto"))
+	modelInfoLabel := widget.NewLabel("")
+	modelInfoLabel.TextStyle = fyne.TextStyle{Italic: true}
 
-	fasterWhisperForm := widget.NewForm(
-		widget.NewFormItem("Model", withMinHeight(p.fasterWhisperModelSelect, 40)),
-		widget.NewFormItem("Device", withMinHeight(p.fasterWhisperDeviceSelect, 40)),
+	// Create status label and download button BEFORE select widget
+	// (select's SetSelected triggers callback that needs these)
+	p.whisperKitModelStatus = widget.NewLabel("Checking...")
+	p.whisperKitDownloadBtn = widget.NewButtonWithIcon("Download Model", theme.DownloadIcon(), func() {
+		p.downloadWhisperKitModel()
+	})
+
+	p.whisperKitModelSelect = widget.NewSelect([]string{
+		"tiny",
+		"base",
+		"small",
+		"medium",
+		"large-v2",
+		"large-v3",
+	}, func(value string) {
+		// Update model info when selection changes
+		if size, ok := modelSizes[value]; ok {
+			modelInfoLabel.SetText(size)
+		}
+		// Recheck if selected model is downloaded
+		p.checkWhisperKitModel()
+	})
+	selectedModel := getOrDefault(p.config.WhisperKitModel, "base")
+	p.whisperKitModelSelect.SetSelected(selectedModel)
+	if size, ok := modelSizes[selectedModel]; ok {
+		modelInfoLabel.SetText(size)
+	}
+
+	whisperKitForm := widget.NewForm(
+		widget.NewFormItem("Model", p.whisperKitModelSelect),
 	)
-	p.fasterWhisperSettings = container.NewVBox(
+
+	p.whisperKitSettings = container.NewVBox(
 		widget.NewSeparator(),
-		widget.NewLabel("FasterWhisper Settings"),
-		container.NewPadded(fasterWhisperForm),
+		widget.NewLabel("WhisperKit Settings"),
+		container.NewPadded(whisperKitForm),
+		container.NewPadded(modelInfoLabel),
+		container.NewHBox(
+			p.whisperKitModelStatus,
+			p.whisperKitDownloadBtn,
+		),
 	)
 
 	// OpenAI TTS settings
@@ -266,7 +304,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		widget.NewSeparator(),
 		widget.NewLabel("Providers"),
 		container.NewPadded(providersForm),
-		p.fasterWhisperSettings,
+		p.whisperKitSettings,
 		p.openaiTTSSettings,
 		p.cosyVoiceSettings,
 		widget.NewSeparator(),
@@ -294,27 +332,97 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 }
 
 func (p *SettingsPanel) updateConditionalUI() {
-	if p.fasterWhisperSettings == nil || p.openaiTTSSettings == nil || p.cosyVoiceSettings == nil {
+	if p.openaiTTSSettings == nil || p.cosyVoiceSettings == nil || p.whisperKitSettings == nil {
 		return
 	}
 
-	if p.transcriptionSelect.Selected == "faster-whisper" {
-		p.fasterWhisperSettings.Show()
+	// WhisperKit settings
+	if p.transcriptionSelect.Selected == "whisperkit" {
+		p.whisperKitSettings.Show()
+		p.checkWhisperKitModel()
 	} else {
-		p.fasterWhisperSettings.Hide()
+		p.whisperKitSettings.Hide()
 	}
 
+	// OpenAI TTS settings
 	if p.ttsSelect.Selected == "openai" {
 		p.openaiTTSSettings.Show()
 	} else {
 		p.openaiTTSSettings.Hide()
 	}
 
+	// CosyVoice settings
 	if p.ttsSelect.Selected == "cosyvoice" {
 		p.cosyVoiceSettings.Show()
 	} else {
 		p.cosyVoiceSettings.Hide()
 	}
+}
+
+// checkWhisperKitModel checks if the WhisperKit model is downloaded
+func (p *SettingsPanel) checkWhisperKitModel() {
+	if p.whisperKitModelSelect == nil {
+		return
+	}
+
+	model := p.whisperKitModelSelect.Selected
+	if model == "" {
+		model = "base"
+	}
+	service := services.NewWhisperKitService(model)
+
+	if service.IsModelDownloaded() {
+		p.whisperKitModelStatus.SetText(fmt.Sprintf("%s model ready", model))
+		p.whisperKitDownloadBtn.Hide()
+	} else {
+		p.whisperKitModelStatus.SetText(fmt.Sprintf("%s model not downloaded", model))
+		p.whisperKitDownloadBtn.Show()
+	}
+}
+
+// downloadWhisperKitModel downloads the model with progress dialog
+func (p *SettingsPanel) downloadWhisperKitModel() {
+	model := p.whisperKitModelSelect.Selected
+	if model == "" {
+		model = "base"
+	}
+
+	progress := widget.NewProgressBarInfinite()
+	statusLabel := widget.NewLabel(fmt.Sprintf("Downloading WhisperKit %s model...", model))
+	statusLabel.Wrapping = fyne.TextWrapWord
+
+	content := container.NewVBox(
+		widget.NewLabel("This may take a few minutes depending on your internet connection."),
+		widget.NewSeparator(),
+		statusLabel,
+		progress,
+	)
+
+	d := dialog.NewCustomWithoutButtons(fmt.Sprintf("Downloading WhisperKit %s Model", model), content, p.window)
+	d.Resize(fyne.NewSize(400, 150))
+	d.Show()
+
+	go func() {
+		service := services.NewWhisperKitService(model)
+		err := service.DownloadModel(func(line string) {
+			// Update status label on main thread
+			fyne.Do(func() {
+				statusLabel.SetText(line)
+			})
+		})
+
+		// All UI updates must be on main thread
+		fyne.Do(func() {
+			d.Hide()
+
+			if err != nil {
+				dialog.ShowError(err, p.window)
+			} else {
+				p.checkWhisperKitModel()
+				dialog.ShowInformation("Download Complete", fmt.Sprintf("WhisperKit %s model is ready to use!", model), p.window)
+			}
+		})
+	}()
 }
 
 func (p *SettingsPanel) saveSettings() {
@@ -323,8 +431,8 @@ func (p *SettingsPanel) saveSettings() {
 	p.config.TranslationProvider = p.translationSelect.Selected
 	p.config.TTSProvider = p.ttsSelect.Selected
 
-	p.config.FasterWhisperModel = p.fasterWhisperModelSelect.Selected
-	p.config.FasterWhisperDevice = p.fasterWhisperDeviceSelect.Selected
+	// WhisperKit model
+	p.config.WhisperKitModel = p.whisperKitModelSelect.Selected
 
 	p.config.OpenAITTSModel = p.openaiTTSModelSelect.Selected
 
@@ -368,9 +476,9 @@ func (p *SettingsPanel) getCostEstimate() string {
 	case "groq":
 		transcriptCostNum = 0.15
 		transcriptCost = "~$0.15 (ultra-fast)"
-	case "faster-whisper":
+	case "whisperkit":
 		transcriptCostNum = 0
-		transcriptCost = "Free (local GPU)"
+		transcriptCost = "Free (Apple Silicon)"
 	default:
 		transcriptCostNum = 0
 		transcriptCost = "Free (local)"

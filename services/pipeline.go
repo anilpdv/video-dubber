@@ -21,6 +21,7 @@ type Pipeline struct {
 	// Transcription providers
 	whisper       *WhisperService
 	fasterWhisper *FasterWhisperService
+	whisperkit    *WhisperKitService
 	groq          *GroqTranscriptionService
 
 	// Translation providers
@@ -50,13 +51,22 @@ func NewPipeline(config *models.Config) *Pipeline {
 		tts:        NewTTSService(config.DefaultVoice),
 	}
 
-	// Initialize FasterWhisper if selected
+	// Initialize FasterWhisper if selected (dev only)
 	if config.TranscriptionProvider == "faster-whisper" {
 		p.fasterWhisper = NewFasterWhisperService(
 			config.PythonPath,
 			config.FasterWhisperModel,
 			config.FasterWhisperDevice,
 		)
+	}
+
+	// Initialize WhisperKit if selected (native macOS Apple Silicon)
+	if config.TranscriptionProvider == "whisperkit" {
+		model := config.WhisperKitModel
+		if model == "" {
+			model = "base"
+		}
+		p.whisperkit = NewWhisperKitService(model)
 	}
 
 	// Initialize Groq if selected and API key available
@@ -237,6 +247,10 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 					reportProgress("Transcribing", percent, msg)
 				},
 			)
+
+		case "whisperkit":
+			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using WhisperKit (Apple Silicon)...")
+			subtitles, err = p.whisperkit.Transcribe(audioPath, job.SourceLang)
 
 		case "openai":
 			reportProgress("Transcribing", config.ProgressTranscribeStart+1, "Using OpenAI Whisper API...")
@@ -512,6 +526,13 @@ func (p *Pipeline) ValidateJob(job *models.TranslationJob) error {
 		if err := p.fasterWhisper.CheckInstalled(); err != nil {
 			return err
 		}
+	case "whisperkit":
+		if p.whisperkit == nil {
+			return fmt.Errorf("WhisperKit not initialized")
+		}
+		if err := p.whisperkit.CheckInstalled(); err != nil {
+			return err
+		}
 	case "openai":
 		if p.config.OpenAIKey == "" {
 			return fmt.Errorf("OpenAI API key required for OpenAI Whisper")
@@ -594,11 +615,16 @@ func (p *Pipeline) CheckDependencies() map[string]error {
 	results["ffmpeg"] = p.ffmpeg.CheckInstalled()
 
 	// Check transcription providers
+	// Always check WhisperKit (primary option for macOS Apple Silicon)
+	whisperkitModel := p.config.WhisperKitModel
+	if whisperkitModel == "" {
+		whisperkitModel = "base"
+	}
+	whisperkitCheck := NewWhisperKitService(whisperkitModel)
+	results["whisperkit"] = whisperkitCheck.CheckInstalled()
+
 	results["whisper-cpp"] = p.whisper.CheckInstalled()
 	results["whisper-model"] = p.whisper.CheckModel()
-	if p.fasterWhisper != nil {
-		results["faster-whisper"] = p.fasterWhisper.CheckInstalled()
-	}
 	if p.groq != nil {
 		results["groq"] = p.groq.CheckInstalled()
 	}
@@ -648,6 +674,8 @@ func (p *Pipeline) GetEstimatedTime(videoDuration float64) time.Duration {
 		multiplier = 0.5 // API is fast
 	case "faster-whisper":
 		multiplier = 0.3 // GPU is fast
+	case "whisperkit":
+		multiplier = 0.2 // Native CoreML is very fast
 	}
 
 	return time.Duration(videoDuration*multiplier) * time.Second

@@ -78,23 +78,27 @@ func (p *DependenciesPanel) runCheck() {
 
 	order := []string{
 		"ffmpeg",
-		"whisper",
+		"whisperkit",
+		"whisper-cpp",
 		"whisper-model",
 		"argos-translate",
 		"argos-ru-en",
 		"piper-tts",
 		"piper-voice",
+		"edge-tts",
 	}
 
 	// Friendly names for display
 	names := map[string]string{
-		"ffmpeg":         "FFmpeg",
-		"whisper":        "Whisper",
-		"whisper-model":  "Whisper Model",
+		"ffmpeg":          "FFmpeg",
+		"whisperkit":      "WhisperKit (Apple Silicon)",
+		"whisper-cpp":     "Whisper.cpp",
+		"whisper-model":   "Whisper Model",
 		"argos-translate": "Argos Translate",
-		"argos-ru-en":    "Russian-English Model",
-		"piper-tts":      "Piper TTS",
-		"piper-voice":    "Piper Voice",
+		"argos-ru-en":     "Russian-English Model",
+		"piper-tts":       "Piper TTS",
+		"piper-voice":     "Piper Voice",
+		"edge-tts":        "Edge TTS",
 	}
 
 	allGood := true

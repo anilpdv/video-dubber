@@ -18,9 +18,10 @@ import (
 
 // EdgeTTSService handles text-to-speech using Microsoft Edge TTS (FREE)
 type EdgeTTSService struct {
-	voice   string
-	ffmpeg  *FFmpegService
-	tempDir string
+	voice       string
+	edgeTTSPath string
+	ffmpeg      *FFmpegService
+	tempDir     string
 }
 
 // Edge TTS voices - common high-quality neural voices
@@ -57,15 +58,21 @@ func NewEdgeTTSService(voice string) *EdgeTTSService {
 	os.MkdirAll(tempDir, 0755)
 
 	return &EdgeTTSService{
-		voice:   voice,
-		ffmpeg:  NewFFmpegService(),
-		tempDir: tempDir,
+		voice:       voice,
+		edgeTTSPath: findExecutable("edge-tts"),
+		ffmpeg:      NewFFmpegService(),
+		tempDir:     tempDir,
 	}
 }
 
 // CheckInstalled verifies edge-tts is installed
 func (s *EdgeTTSService) CheckInstalled() error {
-	cmd := exec.Command("edge-tts", "--version")
+	// Check if the path exists (edgeTTSPath may already be full path from findExecutable)
+	if _, err := os.Stat(s.edgeTTSPath); err == nil {
+		return nil
+	}
+	// Fallback to running command
+	cmd := exec.Command(s.edgeTTSPath, "--version")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("edge-tts not installed. Install with: pip install edge-tts")
 	}
@@ -167,7 +174,7 @@ func (s *EdgeTTSService) attemptTTS(tempFileName, voice, outputPath string, _ in
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "edge-tts", cmdArgs...)
+	cmd := exec.CommandContext(ctx, s.edgeTTSPath, cmdArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {

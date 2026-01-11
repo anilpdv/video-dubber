@@ -23,11 +23,11 @@ type Stage struct {
 // DefaultStages returns the translation pipeline stages
 func DefaultStages() []Stage {
 	return []Stage{
-		{ID: "extract", Label: "Extract"},
-		{ID: "transcribe", Label: "Transcribe"},
+		{ID: "extract", Label: "Prepare"},
+		{ID: "transcribe", Label: "Listen"},
 		{ID: "translate", Label: "Translate"},
-		{ID: "synthesize", Label: "Synthesize"},
-		{ID: "mux", Label: "Mux"},
+		{ID: "synthesize", Label: "Speak"},
+		{ID: "mux", Label: "Finish"},
 	}
 }
 

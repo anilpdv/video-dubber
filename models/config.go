@@ -46,6 +46,9 @@ type Config struct {
 	FasterWhisperModel  string `json:"faster_whisper_model"`  // tiny, base, small, medium, large-v2, large-v3
 	FasterWhisperDevice string `json:"faster_whisper_device"` // auto, cuda, cpu
 
+	// WhisperKit settings (native macOS Apple Silicon)
+	WhisperKitModel string `json:"whisperkit_model"` // tiny, base, small, medium, large-v2, large-v3
+
 	// OpenAI TTS settings (high quality voices)
 	OpenAITTSModel string  `json:"openai_tts_model"` // tts-1, tts-1-hd
 	OpenAITTSVoice string  `json:"openai_tts_voice"` // alloy, echo, fable, onyx, nova, shimmer
@@ -85,7 +88,7 @@ func DefaultConfig() *Config {
 		PythonPath:     "python3",
 
 		// Provider selection (default to local/free options)
-		TranscriptionProvider: "whisper-cpp",
+		TranscriptionProvider: "whisperkit", // Native macOS (Apple Silicon)
 		TranslationProvider:   "argos",
 		TTSProvider:           "piper",
 
@@ -105,6 +108,9 @@ func DefaultConfig() *Config {
 		// FasterWhisper settings
 		FasterWhisperModel:  "base",
 		FasterWhisperDevice: "auto",
+
+		// WhisperKit settings (native macOS Apple Silicon)
+		WhisperKitModel: "base",
 
 		// OpenAI TTS settings
 		OpenAITTSModel: "tts-1",

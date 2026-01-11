@@ -59,7 +59,7 @@ func NewTTSService(voiceModel string) *TTSService {
 	}
 
 	return &TTSService{
-		piperPath:  "piper",
+		piperPath:  findExecutable("piper"),
 		voiceModel: voiceModel,
 		voicesDir:  voicesDir,
 		ffmpeg:     NewFFmpegService(),
@@ -69,6 +69,11 @@ func NewTTSService(voiceModel string) *TTSService {
 
 // CheckInstalled verifies Piper TTS is available
 func (s *TTSService) CheckInstalled() error {
+	// Check if the path exists (piperPath may already be full path from findExecutable)
+	if _, err := os.Stat(s.piperPath); err == nil {
+		return nil
+	}
+	// Fallback to running command
 	cmd := exec.Command(s.piperPath, "--help")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("piper TTS not found. Install with: pip install piper-tts")

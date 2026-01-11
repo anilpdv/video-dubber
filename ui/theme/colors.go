@@ -13,10 +13,10 @@ var (
 	ColorSidebarHover   = color.NRGBA{R: 45, G: 45, B: 45, A: 255}   // #2D2D2D
 	ColorSidebarActive  = color.NRGBA{R: 55, G: 55, B: 55, A: 255}   // #373737
 
-	// Accent colors (cyan/teal for media apps)
-	ColorPrimary        = color.NRGBA{R: 0, G: 188, B: 212, A: 255}   // #00BCD4
-	ColorPrimaryVariant = color.NRGBA{R: 0, G: 151, B: 167, A: 255}   // #0097A7
-	ColorSecondary      = color.NRGBA{R: 100, G: 221, B: 239, A: 255} // #64DDEF
+	// Accent colors (Brand plum)
+	ColorPrimary        = color.NRGBA{R: 92, G: 58, B: 88, A: 255}    // #5C3A58 (brand plum)
+	ColorPrimaryVariant = color.NRGBA{R: 71, G: 45, B: 68, A: 255}    // #472D44 (darker plum)
+	ColorSecondary      = color.NRGBA{R: 125, G: 90, B: 121, A: 255}  // #7D5A79 (lighter plum)
 
 	// Text colors
 	ColorTextPrimary   = color.NRGBA{R: 255, G: 255, B: 255, A: 255} // #FFFFFF
@@ -36,7 +36,7 @@ var (
 	ColorInputBg      = color.NRGBA{R: 35, G: 35, B: 35, A: 255}   // #232323
 	ColorHover        = color.NRGBA{R: 255, G: 255, B: 255, A: 20} // White with low opacity
 	ColorPressed      = color.NRGBA{R: 255, G: 255, B: 255, A: 30} // White with higher opacity
-	ColorFocusBorder  = color.NRGBA{R: 0, G: 188, B: 212, A: 180}  // Primary with transparency
+	ColorFocusBorder  = color.NRGBA{R: 92, G: 58, B: 88, A: 180}   // Primary with transparency
 	ColorDisabledBg   = color.NRGBA{R: 38, G: 38, B: 38, A: 255}   // #262626
 	ColorScrollbar    = color.NRGBA{R: 80, G: 80, B: 80, A: 255}   // #505050
 	ColorBottomPanel  = color.NRGBA{R: 22, G: 22, B: 22, A: 255}   // #161616
