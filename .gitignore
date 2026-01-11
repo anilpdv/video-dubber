@@ -1,0 +1,8 @@
+*.cer
+*.p12
+Video-Translator-*.zip
+.DS_Store
+*.app
+video-translator
+development.cer
+developerID_application.cer

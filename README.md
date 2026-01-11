@@ -85,6 +85,18 @@ go run main.go
 fyne package -os darwin
 ```
 
+### Troubleshooting
+
+**"App is damaged" error on macOS:**
+
+This happens because the app isn't code-signed. Run this command to fix:
+
+```bash
+xattr -cr "/Applications/Video Translator.app"
+```
+
+Or: Right-click the app → Open → Click "Open" in the dialog.
+
 ## Usage
 
 1. **Add Files** - Click "Add Files" or "Add Folder" to select videos
