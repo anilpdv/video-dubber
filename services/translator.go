@@ -23,6 +23,7 @@ import (
 var (
 	openAITranslateRetries  = config.DefaultMaxRetries
 	maxTranslationWorkers   = config.WorkersOpenAI
+	argosTranslationWorkers = 8 // Reduced from 20 to limit CPU usage for local Python processes
 	openAITranslationChunk  = config.ChunkSizeOpenAI
 )
 
@@ -182,7 +183,7 @@ func (s *TranslatorService) TranslateSubtitlesWithProgress(
 	sourceLang, targetLang string,
 	onProgress func(current, total int),
 ) (models.SubtitleList, error) {
-	logger.LogInfo("Argos Translate: %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, maxTranslationWorkers)
+	logger.LogInfo("Argos Translate: %d subtitles (%s → %s) with %d workers", len(subs), sourceLang, targetLang, argosTranslationWorkers)
 
 	if len(subs) == 0 {
 		return subs, nil
@@ -211,14 +212,17 @@ func (s *TranslatorService) TranslateSubtitlesWithProgress(
 	jobs := make(chan translationJob, len(batches))
 	results := make(chan translationResult, len(batches))
 
-	// Start worker pool
+	// Start worker pool (limited to reduce CPU usage)
 	var wg sync.WaitGroup
-	for w := 0; w < maxTranslationWorkers; w++ {
+	for w := 0; w < argosTranslationWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
+				// Acquire CPU slot to prevent system overload
+				AcquireCPUSlot()
 				translated, err := s.TranslateBatch(job.texts, sourceLang, targetLang)
+				ReleaseCPUSlot()
 				results <- translationResult{
 					batchIdx:     job.batchIdx,
 					translations: translated,
