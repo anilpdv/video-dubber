@@ -313,3 +313,317 @@ func (s *GrokTranslationService) CheckAPIKey() error {
 	}
 	return nil
 }
+
+// grokEmotionResult represents the result of a batch translation with emotions
+type grokEmotionResult struct {
+	batchIndex int
+	translated []emotionTranslation
+	err        error
+}
+
+// TranslateSubtitlesWithEmotions translates subtitles with emotion detection for Fish Audio TTS
+func (s *GrokTranslationService) TranslateSubtitlesWithEmotions(
+	subs models.SubtitleList,
+	sourceLang, targetLang string,
+	onProgress func(current, total int),
+) (models.SubtitleList, error) {
+	if s.apiKey == "" {
+		return nil, fmt.Errorf("Grok API key is required. Get one at https://console.x.ai")
+	}
+
+	if len(subs) == 0 {
+		return subs, nil
+	}
+
+	total := len(subs)
+	translatedSubs := make(models.SubtitleList, total)
+
+	// Copy original subtitles (preserve timing, index)
+	for i, sub := range subs {
+		translatedSubs[i] = models.Subtitle{
+			Index:     sub.Index,
+			StartTime: sub.StartTime,
+			EndTime:   sub.EndTime,
+			Text:      sub.Text,
+		}
+	}
+
+	// Deduplication: Build unique text list
+	uniqueTextMap := make(map[string]int)
+	var uniqueTexts []string
+	subtitleToUnique := make([]int, total)
+
+	for i, sub := range subs {
+		txt := strings.TrimSpace(sub.Text)
+		if txt == "" {
+			subtitleToUnique[i] = -1
+			continue
+		}
+		if idx, exists := uniqueTextMap[txt]; exists {
+			subtitleToUnique[i] = idx
+		} else {
+			idx := len(uniqueTexts)
+			uniqueTextMap[txt] = idx
+			uniqueTexts = append(uniqueTexts, txt)
+			subtitleToUnique[i] = idx
+		}
+	}
+
+	uniqueCount := len(uniqueTexts)
+	logger.LogInfo("Grok (with emotions): %d subtitles → %d unique texts, %d workers",
+		total, uniqueCount, grokWorkers)
+
+	if uniqueCount == 0 {
+		return translatedSubs, nil
+	}
+
+	// Create batch jobs
+	var jobs []grokJob
+	for i := 0; i < uniqueCount; i += grokChunkSize {
+		end := i + grokChunkSize
+		if end > uniqueCount {
+			end = uniqueCount
+		}
+		jobs = append(jobs, grokJob{
+			batchIndex: len(jobs),
+			startIdx:   i,
+			endIdx:     end,
+		})
+	}
+
+	// Worker pool
+	jobChan := make(chan grokJob, len(jobs))
+	resultChan := make(chan grokEmotionResult, len(jobs))
+
+	var progressMutex sync.Mutex
+	completedCount := 0
+
+	var wg sync.WaitGroup
+	numWorkers := grokWorkers
+	if len(jobs) < numWorkers {
+		numWorkers = len(jobs)
+	}
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobChan {
+				textsToTranslate := uniqueTexts[job.startIdx:job.endIdx]
+				translated, err := s.translateBatchWithEmotionsRetry(textsToTranslate, sourceLang, targetLang)
+				resultChan <- grokEmotionResult{
+					batchIndex: job.batchIndex,
+					translated: translated,
+					err:        err,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for _, job := range jobs {
+			jobChan <- job
+		}
+		close(jobChan)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	results := make(map[int]grokEmotionResult)
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("Grok emotion translation batch %d failed: %w", result.batchIndex, result.err)
+		}
+		results[result.batchIndex] = result
+
+		if onProgress != nil {
+			progressMutex.Lock()
+			batchSize := jobs[result.batchIndex].endIdx - jobs[result.batchIndex].startIdx
+			completedCount += batchSize
+			scaledProgress := (completedCount * total) / uniqueCount
+			onProgress(scaledProgress, total)
+			progressMutex.Unlock()
+		}
+	}
+
+	// Build translations array with emotions
+	uniqueTranslations := make([]emotionTranslation, uniqueCount)
+	for batchIdx, job := range jobs {
+		result := results[batchIdx]
+		for j := 0; j < len(result.translated) && job.startIdx+j < uniqueCount; j++ {
+			idx := job.startIdx + j
+			uniqueTranslations[idx] = emotionTranslation{
+				emotion: result.translated[j].emotion,
+				text:    text.Postprocess(result.translated[j].text),
+			}
+		}
+	}
+
+	// Map back to all subtitles with emotions
+	for i := 0; i < total; i++ {
+		uniqueIdx := subtitleToUnique[i]
+		if uniqueIdx >= 0 && uniqueIdx < len(uniqueTranslations) {
+			translatedSubs[i].Text = uniqueTranslations[uniqueIdx].text
+			translatedSubs[i].Emotion = uniqueTranslations[uniqueIdx].emotion
+		}
+	}
+
+	return translatedSubs, nil
+}
+
+// translateBatchWithEmotionsRetry wraps translateBatchWithEmotions with retry logic
+func (s *GrokTranslationService) translateBatchWithEmotionsRetry(texts []string, sourceLang, targetLang string) ([]emotionTranslation, error) {
+	var lastErr error
+	for attempt := 1; attempt <= grokRetries; attempt++ {
+		translated, err := s.translateBatchWithEmotions(texts, sourceLang, targetLang)
+		if err == nil {
+			return translated, nil
+		}
+		lastErr = err
+
+		if attempt < grokRetries {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("failed after %d retries: %w", grokRetries, lastErr)
+}
+
+// translateBatchWithEmotions sends a batch of texts to Grok for translation with emotion detection
+func (s *GrokTranslationService) translateBatchWithEmotions(texts []string, sourceLang, targetLang string) ([]emotionTranslation, error) {
+	srcName := text.GetLanguageName(sourceLang)
+	tgtName := text.GetLanguageName(targetLang)
+
+	inputText := strings.Join(texts, "\n|||SUBTITLE|||\n")
+
+	// Emotion-aware prompt for Fish Audio TTS
+	prompt := fmt.Sprintf(`You are translating video subtitles from %s to %s for text-to-speech dubbing.
+
+TASK: For each subtitle, provide BOTH an emotion tag AND the translation.
+
+WHY EMOTIONS MATTER:
+- This translation will be spoken by an AI voice (Fish Audio TTS)
+- Fish Audio supports emotion tags like (happy), (sad), (excited) to make speech sound natural
+- Without emotions, the dubbed audio sounds flat and robotic
+- Matching emotions to content makes the video feel professionally dubbed
+
+AVAILABLE EMOTIONS (pick the most fitting one):
+- (happy) - cheerful, positive content
+- (sad) - melancholic, disappointing news
+- (excited) - energetic, enthusiastic announcements
+- (calm) - neutral explanations, instructions
+- (angry) - frustrated, complaints
+- (surprised) - unexpected information
+- (nervous) - uncertain, worried
+- (confident) - assertive statements
+- (curious) - questions, wondering
+- (empathetic) - understanding, supportive
+
+FORMAT: Return each line as: emotion|translated_text
+Example: happy|This is amazing news!
+
+RULES:
+1. Use ONLY emotions from the list above (lowercase, no parentheses in output)
+2. Use "calm" for neutral/informational content (most common)
+3. Match emotion to the MEANING of the text, not just keywords
+4. Keep translations natural and conversational
+5. Separate entries with "|||SUBTITLE|||"
+
+SUBTITLES TO TRANSLATE:
+%s`, srcName, tgtName, inputText)
+
+	reqBody := map[string]interface{}{
+		"model": grokModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.3,
+		"max_tokens":  8192,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", grokAPIEndpoint, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Grok API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
+			return nil, fmt.Errorf("Grok API error: %s", errResp.Error.Message)
+		}
+		return nil, fmt.Errorf("Grok API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Grok")
+	}
+
+	// Parse emotion|text format
+	translatedText := result.Choices[0].Message.Content
+	parts := text.SplitByDelimiter(translatedText, "|||SUBTITLE|||")
+
+	translations := make([]emotionTranslation, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		emotion, translatedPart := parseEmotionText(part)
+		if translatedPart == "" && i < len(texts) {
+			translatedPart = texts[i]
+		}
+
+		translations = append(translations, emotionTranslation{
+			emotion: emotion,
+			text:    translatedPart,
+		})
+	}
+
+	// Pad if needed
+	for len(translations) < len(texts) {
+		translations = append(translations, emotionTranslation{
+			emotion: "calm",
+			text:    texts[len(translations)],
+		})
+	}
+
+	return translations[:len(texts)], nil
+}

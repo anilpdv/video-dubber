@@ -30,10 +30,11 @@ type Pipeline struct {
 	grok       *GrokTranslationService
 
 	// TTS providers
-	tts       *TTSService
-	openaiTTS *OpenAITTSService
-	cosyvoice *CosyVoiceService
-	edgeTTS   *EdgeTTSService
+	tts         *TTSService
+	openaiTTS   *OpenAITTSService
+	cosyvoice   *CosyVoiceService
+	edgeTTS     *EdgeTTSService
+	fishAudioTTS *FishAudioTTSService
 
 	onProgress ProgressCallback
 	tempDir    string
@@ -109,6 +110,16 @@ func NewPipeline(config *models.Config) *Pipeline {
 	// Initialize Edge TTS if selected (FREE neural TTS)
 	if config.TTSProvider == "edge-tts" {
 		p.edgeTTS = NewEdgeTTSService(config.EdgeTTSVoice)
+	}
+
+	// Initialize Fish Audio TTS if selected and API key available
+	if config.TTSProvider == "fish-audio" && config.FishAudioAPIKey != "" {
+		p.fishAudioTTS = NewFishAudioTTSService(
+			config.FishAudioAPIKey,
+			config.FishAudioModel,
+			config.FishAudioReferenceID,
+			config.FishAudioSpeed,
+		)
 	}
 
 	return p
@@ -321,44 +332,90 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 	var translatedSubs models.SubtitleList
 	switch transProvider {
 	case "deepseek":
-		reportProgress("Translating", config.ProgressTranslateStart+1, "Using DeepSeek (cost-effective)...")
-		translatedSubs, err = p.deepseek.TranslateSubtitles(
-			subtitles,
-			job.SourceLang,
-			job.TargetLang,
-			func(current, total int) {
-				percent := config.ProgressTranslateStart + (current*translateRange)/total
-				msg := fmt.Sprintf("DeepSeek: %d/%d segments", current, total)
-				reportProgress("Translating", percent, msg)
-			},
-		)
+		// Use emotion-aware translation when TTS is Fish Audio (enables expressive speech)
+		if p.config.TTSProvider == "fish-audio" {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using DeepSeek with emotion detection...")
+			translatedSubs, err = p.deepseek.TranslateSubtitlesWithEmotions(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("DeepSeek (emotions): %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		} else {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using DeepSeek (cost-effective)...")
+			translatedSubs, err = p.deepseek.TranslateSubtitles(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("DeepSeek: %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		}
 
 	case "openai":
-		reportProgress("Translating", config.ProgressTranslateStart+1, "Using OpenAI GPT-4o-mini...")
-		translatedSubs, err = p.translator.TranslateWithOpenAI(
-			subtitles,
-			job.SourceLang,
-			job.TargetLang,
-			p.config.OpenAIKey,
-			func(current, total int) {
-				percent := config.ProgressTranslateStart + (current*translateRange)/total
-				msg := fmt.Sprintf("GPT-4o-mini: %d/%d segments", current, total)
-				reportProgress("Translating", percent, msg)
-			},
-		)
+		// Use emotion-aware translation when TTS is Fish Audio (enables expressive speech)
+		if p.config.TTSProvider == "fish-audio" {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using OpenAI GPT-4o-mini with emotion detection...")
+			translatedSubs, err = p.translator.TranslateWithOpenAIEmotions(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				p.config.OpenAIKey,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("GPT-4o-mini (emotions): %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		} else {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using OpenAI GPT-4o-mini...")
+			translatedSubs, err = p.translator.TranslateWithOpenAI(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				p.config.OpenAIKey,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("GPT-4o-mini: %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		}
 
 	case "grok":
-		reportProgress("Translating", config.ProgressTranslateStart+1, "Using Grok (xAI)...")
-		translatedSubs, err = p.grok.TranslateSubtitles(
-			subtitles,
-			job.SourceLang,
-			job.TargetLang,
-			func(current, total int) {
-				percent := config.ProgressTranslateStart + (current*translateRange)/total
-				msg := fmt.Sprintf("Grok: %d/%d segments", current, total)
-				reportProgress("Translating", percent, msg)
-			},
-		)
+		// Use emotion-aware translation when TTS is Fish Audio (enables expressive speech)
+		if p.config.TTSProvider == "fish-audio" {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using Grok (xAI) with emotion detection...")
+			translatedSubs, err = p.grok.TranslateSubtitlesWithEmotions(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("Grok (emotions): %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		} else {
+			reportProgress("Translating", config.ProgressTranslateStart+1, "Using Grok (xAI)...")
+			translatedSubs, err = p.grok.TranslateSubtitles(
+				subtitles,
+				job.SourceLang,
+				job.TargetLang,
+				func(current, total int) {
+					percent := config.ProgressTranslateStart + (current*translateRange)/total
+					msg := fmt.Sprintf("Grok: %d/%d segments", current, total)
+					reportProgress("Translating", percent, msg)
+				},
+			)
+		}
 
 	default: // "argos"
 		reportProgress("Translating", config.ProgressTranslateStart+1, "Using local Argos Translate...")
@@ -414,6 +471,17 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 		err = p.edgeTTS.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
 			progress := config.ProgressSynthesizeStart + (current*synthesizeRange)/total
 			reportProgress("Synthesizing", progress, fmt.Sprintf("Edge TTS: %d/%d", current, total))
+		})
+
+	case "fish-audio":
+		reportProgress("Synthesizing", config.ProgressSynthesizeStart+1, "Using Fish Audio (Fish Speech quality)...")
+		if p.fishAudioTTS != nil {
+			// Use voice ID from job (selected from voice dropdown)
+			p.fishAudioTTS.SetVoice(job.Voice)
+		}
+		err = p.fishAudioTTS.SynthesizeWithCallback(translatedSubs, dubbedAudioPath, func(current, total int) {
+			progress := config.ProgressSynthesizeStart + (current*synthesizeRange)/total
+			reportProgress("Synthesizing", progress, fmt.Sprintf("Fish Audio: %d/%d", current, total))
 		})
 
 	default: // "piper"
@@ -614,6 +682,17 @@ func (p *Pipeline) ValidateJob(job *models.TranslationJob) error {
 		if err := p.edgeTTS.CheckInstalled(); err != nil {
 			return err
 		}
+	case "fish-audio":
+		if p.fishAudioTTS == nil {
+			return fmt.Errorf("Fish Audio TTS not initialized")
+		}
+		if err := p.fishAudioTTS.CheckInstalled(); err != nil {
+			return err
+		}
+		// Check that a voice is selected
+		if job.Voice == "" {
+			return fmt.Errorf("Fish Audio voice is required. Select a voice from the dropdown")
+		}
 	default: // piper
 		if err := p.tts.CheckInstalled(); err != nil {
 			return err
@@ -666,6 +745,9 @@ func (p *Pipeline) CheckDependencies() map[string]error {
 	}
 	if p.edgeTTS != nil {
 		results["edge-tts"] = p.edgeTTS.CheckInstalled()
+	}
+	if p.fishAudioTTS != nil {
+		results["fish-audio"] = p.fishAudioTTS.CheckInstalled()
 	}
 
 	return results

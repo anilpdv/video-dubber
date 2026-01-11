@@ -512,6 +512,271 @@ func (s *TranslatorService) translateBatchWithOpenAIRetry(texts []string, source
 	return nil, fmt.Errorf("failed after %d retries: %w", openAITranslateRetries, lastErr)
 }
 
+// translateBatchWithOpenAIEmotions sends a batch of texts to GPT-4o-mini for translation with emotion detection
+func (s *TranslatorService) translateBatchWithOpenAIEmotions(texts []string, sourceLang, targetLang, apiKey string) ([]emotionTranslation, error) {
+	srcName := textutil.GetLanguageName(sourceLang)
+	tgtName := textutil.GetLanguageName(targetLang)
+
+	inputText := strings.Join(texts, "\n|||SUBTITLE|||\n")
+
+	// Emotion-aware prompt for Fish Audio TTS
+	prompt := fmt.Sprintf(`You are translating video subtitles from %s to %s for text-to-speech dubbing.
+
+TASK: For each subtitle, provide BOTH an emotion tag AND the translation.
+
+WHY EMOTIONS MATTER:
+- This translation will be spoken by an AI voice (Fish Audio TTS)
+- Fish Audio supports emotion tags like (happy), (sad), (excited) to make speech sound natural
+- Without emotions, the dubbed audio sounds flat and robotic
+- Matching emotions to content makes the video feel professionally dubbed
+
+AVAILABLE EMOTIONS (pick the most fitting one):
+- (happy) - cheerful, positive content
+- (sad) - melancholic, disappointing news
+- (excited) - energetic, enthusiastic announcements
+- (calm) - neutral explanations, instructions
+- (angry) - frustrated, complaints
+- (surprised) - unexpected information
+- (nervous) - uncertain, worried
+- (confident) - assertive statements
+- (curious) - questions, wondering
+- (empathetic) - understanding, supportive
+
+FORMAT: Return each line as: emotion|translated_text
+Example: happy|This is amazing news!
+
+RULES:
+1. Use ONLY emotions from the list above (lowercase, no parentheses in output)
+2. Use "calm" for neutral/informational content (most common)
+3. Match emotion to the MEANING of the text, not just keywords
+4. Keep translations natural and conversational
+5. Separate entries with "|||SUBTITLE|||"
+
+SUBTITLES TO TRANSLATE:
+%s`, srcName, tgtName, inputText)
+
+	reqBody := map[string]interface{}{
+		"model": "gpt-4o-mini",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.3,
+		"max_tokens":  4096,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := openaiTranslatorClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
+			return nil, fmt.Errorf("OpenAI API error: %s", errResp.Error.Message)
+		}
+		return nil, fmt.Errorf("OpenAI API error: %s", string(respBody))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return nil, fmt.Errorf("no response from OpenAI")
+	}
+
+	// Parse emotion|text format
+	translatedText := result.Choices[0].Message.Content
+	parts := textutil.SplitByDelimiter(translatedText, "|||SUBTITLE|||")
+
+	translations := make([]emotionTranslation, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		emotion, translatedPart := parseEmotionText(part)
+		if translatedPart == "" && i < len(texts) {
+			translatedPart = texts[i]
+		}
+
+		translations = append(translations, emotionTranslation{
+			emotion: emotion,
+			text:    textutil.Postprocess(translatedPart),
+		})
+	}
+
+	for len(translations) < len(texts) {
+		translations = append(translations, emotionTranslation{
+			emotion: "calm",
+			text:    texts[len(translations)],
+		})
+	}
+
+	return translations[:len(texts)], nil
+}
+
+// translateBatchWithOpenAIEmotionsRetry wraps translateBatchWithOpenAIEmotions with retry logic
+func (s *TranslatorService) translateBatchWithOpenAIEmotionsRetry(texts []string, sourceLang, targetLang, apiKey string) ([]emotionTranslation, error) {
+	var lastErr error
+	for attempt := 1; attempt <= openAITranslateRetries; attempt++ {
+		translated, err := s.translateBatchWithOpenAIEmotions(texts, sourceLang, targetLang, apiKey)
+		if err == nil {
+			return translated, nil
+		}
+		lastErr = err
+
+		if attempt < openAITranslateRetries {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("failed after %d retries: %w", openAITranslateRetries, lastErr)
+}
+
+// TranslateWithOpenAIEmotions translates subtitles with emotion detection for Fish Audio TTS
+func (s *TranslatorService) TranslateWithOpenAIEmotions(
+	subs models.SubtitleList,
+	sourceLang, targetLang, apiKey string,
+	onProgress func(current, total int),
+) (models.SubtitleList, error) {
+	logger.LogInfo("OpenAI Translation (with emotions): model=gpt-4o-mini %d subtitles (%s → %s)", len(subs), sourceLang, targetLang)
+
+	if apiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key is required")
+	}
+
+	if len(subs) == 0 {
+		return subs, nil
+	}
+
+	total := len(subs)
+	translatedSubs := make(models.SubtitleList, total)
+
+	// Split into batches
+	var batches [][]string
+	var batchIndices []int
+	for i := 0; i < total; i += openAITranslationChunk {
+		end := i + openAITranslationChunk
+		if end > total {
+			end = total
+		}
+		var textsToTranslate []string
+		for j := i; j < end; j++ {
+			textsToTranslate = append(textsToTranslate, subs[j].Text)
+		}
+		batches = append(batches, textsToTranslate)
+		batchIndices = append(batchIndices, i)
+	}
+
+	// Emotion result type
+	type emotionResultBatch struct {
+		batchIdx     int
+		translations []emotionTranslation
+		err          error
+	}
+
+	jobs := make(chan translationJob, len(batches))
+	results := make(chan emotionResultBatch, len(batches))
+
+	var wg sync.WaitGroup
+	for w := 0; w < maxTranslationWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				translated, err := s.translateBatchWithOpenAIEmotionsRetry(job.texts, sourceLang, targetLang, apiKey)
+				results <- emotionResultBatch{
+					batchIdx:     job.batchIdx,
+					translations: translated,
+					err:          err,
+				}
+			}
+		}()
+	}
+
+	for i, batch := range batches {
+		jobs <- translationJob{batchIdx: i, texts: batch}
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	completedSubs := 0
+	translatedBatches := make([][]emotionTranslation, len(batches))
+	var firstErr error
+
+	for result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			continue
+		}
+		if result.err == nil {
+			translatedBatches[result.batchIdx] = result.translations
+			completedSubs += len(result.translations)
+			if onProgress != nil {
+				onProgress(completedSubs, total)
+			}
+		}
+	}
+
+	if firstErr != nil {
+		return nil, fmt.Errorf("OpenAI emotion translation failed: %w", firstErr)
+	}
+
+	// Reassemble results in order
+	for batchIdx, translations := range translatedBatches {
+		startIdx := batchIndices[batchIdx]
+		for j, trans := range translations {
+			idx := startIdx + j
+			if idx < total {
+				translatedSubs[idx] = models.Subtitle{
+					Index:     subs[idx].Index,
+					StartTime: subs[idx].StartTime,
+					EndTime:   subs[idx].EndTime,
+					Text:      trans.text,
+					Emotion:   trans.emotion,
+				}
+			}
+		}
+	}
+
+	return translatedSubs, nil
+}
+
 // TranslateBatch translates multiple texts at once (more efficient)
 func (s *TranslatorService) TranslateBatch(texts []string, sourceLang, targetLang string) ([]string, error) {
 	if len(texts) == 0 {

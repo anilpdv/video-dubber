@@ -239,6 +239,364 @@ func (s *DeepSeekService) translateBatchWithRetry(texts []string, sourceLang, ta
 
 // translateBatch sends a batch of texts to DeepSeek for translation
 func (s *DeepSeekService) translateBatch(texts []string, sourceLang, targetLang string) ([]string, error) {
+	return s.translateBatchStandard(texts, sourceLang, targetLang)
+}
+
+// translateBatchWithEmotions sends a batch of texts to DeepSeek for translation with emotion detection
+func (s *DeepSeekService) translateBatchWithEmotions(texts []string, sourceLang, targetLang string) ([]emotionTranslation, error) {
+	// Use centralized language mappings from internal/text package
+	srcName := text.GetLanguageName(sourceLang)
+	tgtName := text.GetLanguageName(targetLang)
+
+	// Join texts with delimiter
+	inputText := strings.Join(texts, "\n|||SUBTITLE|||\n")
+
+	// Emotion-aware prompt for Fish Audio TTS
+	prompt := fmt.Sprintf(`You are translating video subtitles from %s to %s for text-to-speech dubbing.
+
+TASK: For each subtitle, provide BOTH an emotion tag AND the translation.
+
+WHY EMOTIONS MATTER:
+- This translation will be spoken by an AI voice (Fish Audio TTS)
+- Fish Audio supports emotion tags like (happy), (sad), (excited) to make speech sound natural
+- Without emotions, the dubbed audio sounds flat and robotic
+- Matching emotions to content makes the video feel professionally dubbed
+
+AVAILABLE EMOTIONS (pick the most fitting one):
+- (happy) - cheerful, positive content
+- (sad) - melancholic, disappointing news
+- (excited) - energetic, enthusiastic announcements
+- (calm) - neutral explanations, instructions
+- (angry) - frustrated, complaints
+- (surprised) - unexpected information
+- (nervous) - uncertain, worried
+- (confident) - assertive statements
+- (curious) - questions, wondering
+- (empathetic) - understanding, supportive
+
+FORMAT: Return each line as: emotion|translated_text
+Example: happy|This is amazing news!
+
+RULES:
+1. Use ONLY emotions from the list above (lowercase, no parentheses in output)
+2. Use "calm" for neutral/informational content (most common)
+3. Match emotion to the MEANING of the text, not just keywords
+4. Keep translations natural and conversational
+5. Separate entries with "|||SUBTITLE|||"
+
+SUBTITLES TO TRANSLATE:
+%s`, srcName, tgtName, inputText)
+
+	// Build request body
+	reqBody := map[string]interface{}{
+		"model": deepSeekModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.3,
+		"max_tokens":  config.DeepSeekMaxTokens,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", deepSeekEndpoint, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := deepseekClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
+			return nil, fmt.Errorf("DeepSeek API error: %s", errResp.Error.Message)
+		}
+		return nil, fmt.Errorf("DeepSeek API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return nil, fmt.Errorf("no response from DeepSeek")
+	}
+
+	// Parse emotion|text format
+	translatedText := result.Choices[0].Message.Content
+	parts := text.SplitByDelimiter(translatedText, "|||SUBTITLE|||")
+
+	translations := make([]emotionTranslation, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// Parse "emotion|text" format
+		emotion, translatedPart := parseEmotionText(part)
+
+		// Fallback to original if parsing fails
+		if translatedPart == "" && i < len(texts) {
+			translatedPart = texts[i]
+		}
+
+		translations = append(translations, emotionTranslation{
+			emotion: emotion,
+			text:    cleanTranslation(translatedPart),
+		})
+	}
+
+	// Pad with originals if needed
+	for len(translations) < len(texts) {
+		translations = append(translations, emotionTranslation{
+			emotion: "calm",
+			text:    texts[len(translations)],
+		})
+	}
+
+	return translations[:len(texts)], nil
+}
+
+// emotionTranslation holds a translation with its detected emotion
+type emotionTranslation struct {
+	emotion string
+	text    string
+}
+
+// parseEmotionText parses "emotion|text" format, returns emotion and text
+func parseEmotionText(s string) (string, string) {
+	// Try to split by pipe
+	if idx := strings.Index(s, "|"); idx > 0 && idx < 20 {
+		emotion := strings.TrimSpace(s[:idx])
+		text := strings.TrimSpace(s[idx+1:])
+
+		// Validate emotion is one we support
+		validEmotions := map[string]bool{
+			"happy": true, "sad": true, "excited": true, "calm": true,
+			"angry": true, "surprised": true, "nervous": true, "confident": true,
+			"curious": true, "empathetic": true, "worried": true, "frustrated": true,
+		}
+
+		// Clean up emotion (remove parentheses if present)
+		emotion = strings.TrimPrefix(emotion, "(")
+		emotion = strings.TrimSuffix(emotion, ")")
+		emotion = strings.ToLower(emotion)
+
+		if validEmotions[emotion] && text != "" {
+			return emotion, text
+		}
+	}
+
+	// No valid emotion found, return calm as default
+	return "calm", s
+}
+
+// translateBatchEmotionsWithRetry translates a batch with emotions and retry logic
+func (s *DeepSeekService) translateBatchEmotionsWithRetry(texts []string, sourceLang, targetLang string) ([]emotionTranslation, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxTranslateRetries; attempt++ {
+		translated, err := s.translateBatchWithEmotions(texts, sourceLang, targetLang)
+		if err == nil {
+			return translated, nil
+		}
+		lastErr = err
+
+		// Exponential backoff before retry
+		if attempt < maxTranslateRetries {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("failed after %d retries: %w", maxTranslateRetries, lastErr)
+}
+
+// TranslateSubtitlesWithEmotions translates subtitles and detects emotions for Fish Audio TTS
+// This enables expressive speech synthesis by adding emotion tags like (happy), (sad), etc.
+func (s *DeepSeekService) TranslateSubtitlesWithEmotions(
+	subs models.SubtitleList,
+	sourceLang, targetLang string,
+	onProgress func(current, total int),
+) (models.SubtitleList, error) {
+	if s.apiKey == "" {
+		return nil, fmt.Errorf("DeepSeek API key is required")
+	}
+
+	if len(subs) == 0 {
+		return subs, nil
+	}
+
+	total := len(subs)
+	translatedSubs := make(models.SubtitleList, total)
+
+	// Copy original subtitles (preserve timing, index)
+	for i, sub := range subs {
+		translatedSubs[i] = models.Subtitle{
+			Index:     sub.Index,
+			StartTime: sub.StartTime,
+			EndTime:   sub.EndTime,
+			Text:      sub.Text,
+			Emotion:   "calm", // Default emotion
+		}
+	}
+
+	// === DEDUPLICATION: Build unique text list ===
+	uniqueTextMap := make(map[string]int)
+	var uniqueTexts []string
+	subtitleToUnique := make([]int, total)
+
+	for i, sub := range subs {
+		text := strings.TrimSpace(sub.Text)
+		if text == "" {
+			subtitleToUnique[i] = -1
+			continue
+		}
+		if idx, exists := uniqueTextMap[text]; exists {
+			subtitleToUnique[i] = idx
+		} else {
+			idx := len(uniqueTexts)
+			uniqueTextMap[text] = idx
+			uniqueTexts = append(uniqueTexts, text)
+			subtitleToUnique[i] = idx
+		}
+	}
+
+	uniqueCount := len(uniqueTexts)
+	logger.LogInfo("DeepSeek (with emotions): %d subtitles → %d unique texts, %d workers",
+		total, uniqueCount, maxTranslateWorkers)
+
+	if uniqueCount == 0 {
+		return translatedSubs, nil
+	}
+
+	// === BATCH TRANSLATION WITH EMOTIONS ===
+	var jobs []translateJob
+	for i := 0; i < uniqueCount; i += chunkSize {
+		end := i + chunkSize
+		if end > uniqueCount {
+			end = uniqueCount
+		}
+		jobs = append(jobs, translateJob{
+			batchIndex: len(jobs),
+			startIdx:   i,
+			endIdx:     end,
+		})
+	}
+
+	// Emotion result channel
+	type emotionResult struct {
+		batchIndex int
+		translated []emotionTranslation
+		err        error
+	}
+
+	jobChan := make(chan translateJob, len(jobs))
+	resultChan := make(chan emotionResult, len(jobs))
+
+	var progressMutex sync.Mutex
+	completedCount := 0
+
+	var wg sync.WaitGroup
+	numWorkers := maxTranslateWorkers
+	if len(jobs) < numWorkers {
+		numWorkers = len(jobs)
+	}
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobChan {
+				textsToTranslate := uniqueTexts[job.startIdx:job.endIdx]
+				translated, err := s.translateBatchEmotionsWithRetry(textsToTranslate, sourceLang, targetLang)
+				resultChan <- emotionResult{
+					batchIndex: job.batchIndex,
+					translated: translated,
+					err:        err,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for _, job := range jobs {
+			jobChan <- job
+		}
+		close(jobChan)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	results := make(map[int]emotionResult)
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("DeepSeek emotion translation batch %d failed: %w", result.batchIndex, result.err)
+		}
+		results[result.batchIndex] = result
+
+		if onProgress != nil {
+			progressMutex.Lock()
+			batchSize := jobs[result.batchIndex].endIdx - jobs[result.batchIndex].startIdx
+			completedCount += batchSize
+			scaledProgress := (completedCount * total) / uniqueCount
+			onProgress(scaledProgress, total)
+			progressMutex.Unlock()
+		}
+	}
+
+	// === BUILD UNIQUE TRANSLATIONS ARRAY ===
+	uniqueTranslations := make([]emotionTranslation, uniqueCount)
+	for batchIdx, job := range jobs {
+		result := results[batchIdx]
+		for j := 0; j < len(result.translated) && job.startIdx+j < uniqueCount; j++ {
+			idx := job.startIdx + j
+			uniqueTranslations[idx] = result.translated[j]
+		}
+	}
+
+	// === MAP BACK TO ALL SUBTITLES ===
+	for i := 0; i < total; i++ {
+		uniqueIdx := subtitleToUnique[i]
+		if uniqueIdx >= 0 && uniqueIdx < len(uniqueTranslations) {
+			translatedSubs[i].Text = uniqueTranslations[uniqueIdx].text
+			translatedSubs[i].Emotion = uniqueTranslations[uniqueIdx].emotion
+		}
+	}
+
+	return translatedSubs, nil
+}
+
+// translateBatchStandard sends a batch of texts to DeepSeek for translation (no emotions)
+func (s *DeepSeekService) translateBatchStandard(texts []string, sourceLang, targetLang string) ([]string, error) {
 	// Use centralized language mappings from internal/text package
 	srcName := text.GetLanguageName(sourceLang)
 	tgtName := text.GetLanguageName(targetLang)

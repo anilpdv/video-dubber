@@ -7,6 +7,7 @@ type Subtitle struct {
 	StartTime time.Duration
 	EndTime   time.Duration
 	Text      string
+	Emotion   string // Fish Audio emotion tag (happy, sad, excited, etc.)
 }
 
 type SubtitleList []Subtitle

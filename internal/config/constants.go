@@ -29,6 +29,7 @@ const (
 	WorkersOpenAITTS  = 25 // API calls, TTS is fast
 	WorkersDeepSeek   = 25 // API calls, generous limits
 	WorkersEdgeTTS    = 30 // Free API, very generous rate limits
+	WorkersFishAudio  = 5  // Fish Audio starter tier (5 concurrent requests)
 )
 
 // Audio chunking settings for parallel transcription

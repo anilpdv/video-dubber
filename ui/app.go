@@ -403,6 +403,14 @@ func (ui *MainUI) previewSelectedVoice() {
 		case "edge-tts":
 			svc := services.NewEdgeTTSService(voice)
 			err = svc.Synthesize(sampleText, tempPath)
+		case "fish-audio":
+			svc := services.NewFishAudioTTSService(
+				ui.config.FishAudioAPIKey,
+				ui.config.FishAudioModel,
+				voice, // Use voice from dropdown (contains reference_id)
+				ui.config.FishAudioSpeed,
+			)
+			err = svc.Synthesize(sampleText, tempPath)
 		case "cosyvoice":
 			if ui.config.VoiceCloneSamplePath == "" {
 				fyne.Do(func() {

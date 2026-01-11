@@ -66,6 +66,12 @@ type Config struct {
 	// Edge TTS settings (FREE neural TTS from Microsoft)
 	EdgeTTSVoice string `json:"edge_tts_voice"` // en-US-AriaNeural, en-US-GuyNeural, etc.
 
+	// Fish Audio settings (high-quality cloud TTS via Fish Speech)
+	FishAudioAPIKey      string  `json:"fish_audio_api_key"`
+	FishAudioModel       string  `json:"fish_audio_model"`        // speech-1.5, speech-1.6, s1
+	FishAudioReferenceID string  `json:"fish_audio_reference_id"` // Voice model ID
+	FishAudioSpeed       float64 `json:"fish_audio_speed"`        // 0.5 to 2.0, default 1.0
+
 	// Smart segmentation (uses LLM to improve sentence boundaries)
 	UseSmartSegmentation bool `json:"use_smart_segmentation"`
 
@@ -128,6 +134,12 @@ func DefaultConfig() *Config {
 
 		// Edge TTS settings (FREE)
 		EdgeTTSVoice: "en-US-AriaNeural",
+
+		// Fish Audio settings (high-quality cloud TTS)
+		FishAudioAPIKey:      "",
+		FishAudioModel:       "speech-1.6",
+		FishAudioReferenceID: "",
+		FishAudioSpeed:       1.0,
 
 		// Smart segmentation
 		UseSmartSegmentation: false,

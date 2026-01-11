@@ -58,6 +58,20 @@ func CosyVoices() []VoiceOption {
 	}
 }
 
+// FishAudioVoices returns available Fish Audio voices
+// Voice IDs are reference_ids from fish.audio
+// Browse more voices at https://fish.audio/discover
+func FishAudioVoices() []VoiceOption {
+	return []VoiceOption{
+		{ID: "933563129e564b19a115bedd57b7406a", Name: "Sarah", Provider: "fish-audio"},
+		{ID: "bf322df2096a46f18c579d0baa36f41d", Name: "Adrian", Provider: "fish-audio"},
+		{ID: "b347db033a6549378b48d00acb0d06cd", Name: "Selene", Provider: "fish-audio"},
+		{ID: "536d3a5e000945adb7038665781a4aca", Name: "Ethan", Provider: "fish-audio"},
+		{ID: "802e3bc2b27e49c2995d23ef70e6ac89", Name: "Energetic Male", Provider: "fish-audio"},
+		{ID: "8ef4a238714b45718ce04243307c57a7", Name: "E-girl", Provider: "fish-audio"},
+	}
+}
+
 // GetVoicesForProvider returns voices for a given provider
 func GetVoicesForProvider(provider string) []VoiceOption {
 	switch provider {
@@ -69,6 +83,8 @@ func GetVoicesForProvider(provider string) []VoiceOption {
 		return EdgeTTSVoices()
 	case "cosyvoice":
 		return CosyVoices()
+	case "fish-audio":
+		return FishAudioVoices()
 	default:
 		return EdgeTTSVoices()
 	}

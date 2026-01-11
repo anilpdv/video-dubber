@@ -35,6 +35,7 @@ type SettingsPanel struct {
 	deepSeekKeyEntry          *widget.Entry
 	groqAPIKeyEntry           *widget.Entry
 	grokAPIKeyEntry           *widget.Entry
+	fishAudioAPIKeyEntry      *widget.Entry
 
 	// Audio mixing controls
 	keepBackgroundAudioCheck *widget.Check
@@ -48,6 +49,8 @@ type SettingsPanel struct {
 	whisperKitDownloadBtn *widget.Button
 	openaiTTSSettings     *fyne.Container
 	cosyVoiceSettings     *fyne.Container
+	fishAudioSettings     *fyne.Container
+	fishAudioModelSelect  *widget.Select
 
 	OnSave       func(config *models.Config)
 	OnTTSChanged func(provider string)
@@ -118,6 +121,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 
 	p.ttsSelect = widget.NewSelect([]string{
 		"edge-tts",
+		"fish-audio",
 		"piper",
 		"openai",
 		"cosyvoice",
@@ -245,6 +249,22 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		container.NewPadded(cosyVoiceForm),
 	)
 
+	// Fish Audio settings
+	p.fishAudioModelSelect = widget.NewSelect([]string{
+		"s1", "speech-1.6", "speech-1.5", // s1 is flagship with best quality (same price)
+	}, nil)
+	p.fishAudioModelSelect.SetSelected(getOrDefault(p.config.FishAudioModel, "s1"))
+
+	fishAudioForm := widget.NewForm(
+		widget.NewFormItem("Model", withMinHeight(p.fishAudioModelSelect, 40)),
+	)
+	p.fishAudioSettings = container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabel("Fish Audio Settings"),
+		container.NewPadded(fishAudioForm),
+		widget.NewLabel("Select voice from dropdown in Translate tab"),
+	)
+
 	// API Keys
 	p.openAIKeyEntry = widget.NewPasswordEntry()
 	p.openAIKeyEntry.SetPlaceHolder("sk-...")
@@ -261,6 +281,10 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 	p.grokAPIKeyEntry = widget.NewPasswordEntry()
 	p.grokAPIKeyEntry.SetPlaceHolder("xai-...")
 	p.grokAPIKeyEntry.SetText(p.config.GrokAPIKey)
+
+	p.fishAudioAPIKeyEntry = widget.NewPasswordEntry()
+	p.fishAudioAPIKeyEntry.SetPlaceHolder("Fish Audio API key")
+	p.fishAudioAPIKeyEntry.SetText(p.config.FishAudioAPIKey)
 
 	// Audio mixing controls
 	p.keepBackgroundAudioCheck = widget.NewCheck("Keep background audio/music", nil)
@@ -295,6 +319,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		widget.NewFormItem("DeepSeek API Key", p.deepSeekKeyEntry),
 		widget.NewFormItem("Groq API Key", p.groqAPIKeyEntry),
 		widget.NewFormItem("Grok API Key (xAI)", p.grokAPIKeyEntry),
+		widget.NewFormItem("Fish Audio API Key", p.fishAudioAPIKeyEntry),
 	)
 
 	audioMixingForm := container.NewVBox(
@@ -316,6 +341,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		p.whisperKitSettings,
 		p.openaiTTSSettings,
 		p.cosyVoiceSettings,
+		p.fishAudioSettings,
 		widget.NewSeparator(),
 		widget.NewLabel("API Keys"),
 		container.NewPadded(apiKeysForm),
@@ -339,7 +365,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 }
 
 func (p *SettingsPanel) updateConditionalUI() {
-	if p.openaiTTSSettings == nil || p.cosyVoiceSettings == nil || p.whisperKitSettings == nil {
+	if p.openaiTTSSettings == nil || p.cosyVoiceSettings == nil || p.whisperKitSettings == nil || p.fishAudioSettings == nil {
 		return
 	}
 
@@ -363,6 +389,13 @@ func (p *SettingsPanel) updateConditionalUI() {
 		p.cosyVoiceSettings.Show()
 	} else {
 		p.cosyVoiceSettings.Hide()
+	}
+
+	// Fish Audio settings
+	if p.ttsSelect.Selected == "fish-audio" {
+		p.fishAudioSettings.Show()
+	} else {
+		p.fishAudioSettings.Hide()
 	}
 }
 
@@ -451,6 +484,10 @@ func (p *SettingsPanel) saveSettings() {
 	p.config.DeepSeekKey = p.deepSeekKeyEntry.Text
 	p.config.GroqAPIKey = p.groqAPIKeyEntry.Text
 	p.config.GrokAPIKey = p.grokAPIKeyEntry.Text
+	p.config.FishAudioAPIKey = p.fishAudioAPIKeyEntry.Text
+
+	// Fish Audio settings
+	p.config.FishAudioModel = p.fishAudioModelSelect.Selected
 
 	p.config.KeepBackgroundAudio = p.keepBackgroundAudioCheck.Checked
 	p.config.BackgroundAudioVolume = p.backgroundVolumeSlider.Value / 100.0
@@ -520,6 +557,11 @@ func (p *SettingsPanel) getCostEstimate() string {
 			ttsCostNum = 3.40
 			ttsCost = "~$3.40"
 		}
+	case "fish-audio":
+		// $15/1M UTF-8 bytes, ~180k words = ~12 hours speech
+		// 5hr video ~= 45k words ~= 250k bytes = ~$3.75
+		ttsCostNum = 3.75
+		ttsCost = "~$3.75 (Fish Speech)"
 	case "edge-tts":
 		ttsCostNum = 0
 		ttsCost = "Free (neural)"
