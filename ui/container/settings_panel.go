@@ -456,10 +456,10 @@ func (p *SettingsPanel) downloadWhisperKitModel() {
 			d.Hide()
 
 			if err != nil {
-				dialog.ShowError(err, p.window)
+				dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), p.window)
 			} else {
 				p.checkWhisperKitModel()
-				dialog.ShowInformation("Download Complete", fmt.Sprintf("WhisperKit %s model is ready to use!", model), p.window)
+				dialog.ShowCustom("Download Complete", "OK", widget.NewLabel(fmt.Sprintf("WhisperKit %s model is ready to use!", model)), p.window)
 			}
 		})
 	}()
@@ -495,7 +495,7 @@ func (p *SettingsPanel) saveSettings() {
 	p.config.UseOpenAIAPIs = (p.config.TranscriptionProvider == "openai" || p.config.TranslationProvider == "openai")
 
 	if err := p.config.Save(); err != nil {
-		dialog.ShowError(err, p.window)
+		dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), p.window)
 		return
 	}
 

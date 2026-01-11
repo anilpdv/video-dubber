@@ -318,7 +318,7 @@ func (d *SettingsDialog) saveSettings() {
 	d.config.UseOpenAIAPIs = (d.config.TranscriptionProvider == "openai" || d.config.TranslationProvider == "openai")
 
 	if err := d.config.Save(); err != nil {
-		dialog.ShowError(err, d.window)
+		dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), d.window)
 	}
 }
 
@@ -415,5 +415,5 @@ func ShowDependencyCheck(window fyne.Window, results map[string]error) {
 		status += "\nPlease install missing dependencies."
 	}
 
-	dialog.ShowInformation("Dependency Check", status, window)
+	dialog.ShowCustom("Dependency Check", "OK", widget.NewLabel(status), window)
 }

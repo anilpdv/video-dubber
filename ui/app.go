@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 
 	"video-translator/internal/logger"
 	"video-translator/models"
@@ -220,13 +221,13 @@ func (ui *MainUI) onFileSelected(index int) {
 func (ui *MainUI) onTranslateSelected() {
 	selected := ui.fileListPanel.GetSelectedIndex()
 	if selected < 0 || selected >= len(ui.jobs) {
-		dialog.ShowInformation("No Selection", "Please select a video file to translate.", ui.window)
+		dialog.ShowCustom("No Selection", "OK", widget.NewLabel("Please select a video file to translate."), ui.window)
 		return
 	}
 
 	job := ui.jobs[selected]
 	if job.Status != models.StatusPending {
-		dialog.ShowInformation("Already Processing", "This file is already being processed or completed.", ui.window)
+		dialog.ShowCustom("Already Processing", "OK", widget.NewLabel("This file is already being processed or completed."), ui.window)
 		return
 	}
 
@@ -242,7 +243,7 @@ func (ui *MainUI) onTranslateAll() {
 	}
 
 	if len(pendingJobs) == 0 {
-		dialog.ShowInformation("No Files", "No pending files to translate.", ui.window)
+		dialog.ShowCustom("No Files", "OK", widget.NewLabel("No pending files to translate."), ui.window)
 		return
 	}
 
@@ -284,7 +285,7 @@ func (ui *MainUI) onTranslateAll() {
 		wg.Wait()
 		fyne.Do(func() {
 			ui.progressPanel.SetStatus("")
-			dialog.ShowInformation("Complete", fmt.Sprintf("All %d videos translated!", totalJobs), ui.window)
+			dialog.ShowCustom("Complete", "OK", widget.NewLabel(fmt.Sprintf("All %d videos translated!", totalJobs)), ui.window)
 		})
 	}()
 }
@@ -295,7 +296,7 @@ func (ui *MainUI) translateJob(job *models.TranslationJob) {
 	job.Voice = ui.bottomControls.GetVoice()
 
 	if err := ui.pipeline.ValidateJob(job); err != nil {
-		dialog.ShowError(err, ui.window)
+		dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), ui.window)
 		return
 	}
 
@@ -311,7 +312,7 @@ func (ui *MainUI) translateJob(job *models.TranslationJob) {
 			ui.progressPanel.Update()
 
 			if err != nil {
-				dialog.ShowError(err, ui.window)
+				dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), ui.window)
 			} else {
 				dialog.ShowCustomConfirm("Complete", "Open Folder", "Close",
 					container.NewVBox(
@@ -339,7 +340,7 @@ func (ui *MainUI) translateJobSync(job *models.TranslationJob) {
 
 	if err := ui.pipeline.ValidateJob(job); err != nil {
 		fyne.Do(func() {
-			dialog.ShowError(err, ui.window)
+			dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), ui.window)
 		})
 		return
 	}
@@ -371,7 +372,7 @@ func (ui *MainUI) translateJobSync(job *models.TranslationJob) {
 		ui.progressPanel.Update()
 
 		if err != nil {
-			dialog.ShowError(err, ui.window)
+			dialog.ShowCustom("Error", "OK", widget.NewLabel(err.Error()), ui.window)
 		}
 	})
 }
@@ -395,6 +396,19 @@ func (ui *MainUI) previewSelectedVoice() {
 
 		switch provider {
 		case "piper":
+			// Check if voice model exists, download if missing
+			if !services.VoiceModelExists(voice) {
+				fyne.Do(func() {
+					ui.progressPanel.SetStatus(fmt.Sprintf("Downloading voice: %s...", voice))
+				})
+				if downloadErr := services.DownloadVoiceModel(voice); downloadErr != nil {
+					fyne.Do(func() {
+						dialog.ShowCustom("Error", "OK", widget.NewLabel(fmt.Sprintf("failed to download voice: %v", downloadErr)), ui.window)
+						ui.progressPanel.SetStatus("")
+					})
+					return
+				}
+			}
 			svc := services.NewTTSService(voice)
 			err = svc.Synthesize(sampleText, tempPath)
 		case "openai":
@@ -414,7 +428,7 @@ func (ui *MainUI) previewSelectedVoice() {
 		case "cosyvoice":
 			if ui.config.VoiceCloneSamplePath == "" {
 				fyne.Do(func() {
-					dialog.ShowError(fmt.Errorf("CosyVoice requires a voice sample. Configure it in Settings"), ui.window)
+					dialog.ShowCustom("Error", "OK", widget.NewLabel("CosyVoice requires a voice sample. Configure it in Settings"), ui.window)
 					ui.progressPanel.SetStatus("")
 				})
 				return
@@ -433,7 +447,7 @@ func (ui *MainUI) previewSelectedVoice() {
 
 		if err != nil {
 			fyne.Do(func() {
-				dialog.ShowError(fmt.Errorf("TTS failed: %w", err), ui.window)
+				dialog.ShowCustom("Error", "OK", widget.NewLabel(fmt.Sprintf("TTS failed: %v", err)), ui.window)
 				ui.progressPanel.SetStatus("")
 			})
 			return
@@ -441,7 +455,7 @@ func (ui *MainUI) previewSelectedVoice() {
 
 		if _, statErr := os.Stat(tempPath); os.IsNotExist(statErr) {
 			fyne.Do(func() {
-				dialog.ShowError(fmt.Errorf("audio file was not created"), ui.window)
+				dialog.ShowCustom("Error", "OK", widget.NewLabel("audio file was not created"), ui.window)
 				ui.progressPanel.SetStatus("")
 			})
 			return
@@ -455,7 +469,7 @@ func (ui *MainUI) previewSelectedVoice() {
 
 		fyne.Do(func() {
 			if playErr != nil {
-				dialog.ShowError(fmt.Errorf("playback failed: %w", playErr), ui.window)
+				dialog.ShowCustom("Error", "OK", widget.NewLabel(fmt.Sprintf("playback failed: %v", playErr)), ui.window)
 			}
 			ui.progressPanel.SetStatus("")
 		})

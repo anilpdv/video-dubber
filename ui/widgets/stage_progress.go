@@ -280,7 +280,7 @@ func (r *stageProgressRenderer) Refresh() {
 		} else if i == currentIdx {
 			// Current stage
 			dotColor = th.Color(appTheme.ColorNameJobProcessing, variant)
-			labelColor = th.Color(theme.ColorNamePrimary, variant)
+			labelColor = th.Color(appTheme.ColorNameJobProcessing, variant)
 		} else {
 			// Pending stage
 			dotColor = th.Color(appTheme.ColorNameJobPending, variant)
@@ -307,7 +307,7 @@ func (r *stageProgressRenderer) Refresh() {
 	if r.widget.Status == models.StatusCompleted {
 		r.progressFill.FillColor = th.Color(appTheme.ColorNameJobCompleted, variant)
 	} else if currentIdx >= 0 {
-		r.progressFill.FillColor = th.Color(theme.ColorNamePrimary, variant)
+		r.progressFill.FillColor = th.Color(appTheme.ColorNameJobProcessing, variant)
 	} else {
 		r.progressFill.FillColor = color.Transparent
 	}

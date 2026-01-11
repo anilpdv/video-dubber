@@ -2,6 +2,8 @@ package services
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +90,66 @@ func (s *TTSService) CheckVoiceModel() error {
 		return fmt.Errorf("voice model not found at %s.\nDownload from: https://huggingface.co/rhasspy/piper-voices", modelPath)
 	}
 	return nil
+}
+
+// VoiceModelExists checks if a voice model file exists
+func VoiceModelExists(voice string) bool {
+	homeDir, _ := os.UserHomeDir()
+	voicesDir := filepath.Join(homeDir, ".piper", "voices")
+	modelPath := filepath.Join(voicesDir, voice+".onnx")
+	_, err := os.Stat(modelPath)
+	return err == nil
+}
+
+// DownloadVoiceModel downloads a Piper voice model from HuggingFace
+func DownloadVoiceModel(voice string) error {
+	homeDir, _ := os.UserHomeDir()
+	voicesDir := filepath.Join(homeDir, ".piper", "voices")
+	os.MkdirAll(voicesDir, 0755)
+
+	// Download .onnx model file
+	modelURL := DownloadVoiceModelURL(voice)
+	if modelURL == "" {
+		return fmt.Errorf("invalid voice name: %s", voice)
+	}
+
+	modelPath := filepath.Join(voicesDir, voice+".onnx")
+	if err := downloadFile(modelURL, modelPath); err != nil {
+		return fmt.Errorf("failed to download voice model: %w", err)
+	}
+
+	// Download .onnx.json config file (required by Piper)
+	jsonURL := modelURL + ".json"
+	jsonPath := modelPath + ".json"
+	if err := downloadFile(jsonURL, jsonPath); err != nil {
+		// Clean up the model file if config download fails
+		os.Remove(modelPath)
+		return fmt.Errorf("failed to download voice config: %w", err)
+	}
+
+	return nil
+}
+
+// downloadFile downloads a file from URL to local path
+func downloadFile(url, destPath string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
 }
 
 // getModelPath returns the full path to the voice model
