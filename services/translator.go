@@ -23,7 +23,7 @@ import (
 var (
 	openAITranslateRetries  = config.DefaultMaxRetries
 	maxTranslationWorkers   = config.WorkersOpenAI
-	argosTranslationWorkers = 8 // Reduced from 20 to limit CPU usage for local Python processes
+	argosTranslationWorkers = 4 // Reduced to 4 for ~50% CPU usage (each Python process uses 1 core)
 	openAITranslationChunk  = config.ChunkSizeOpenAI
 )
 

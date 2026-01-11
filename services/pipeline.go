@@ -27,6 +27,7 @@ type Pipeline struct {
 	// Translation providers
 	translator *TranslatorService
 	deepseek   *DeepSeekService
+	grok       *GrokTranslationService
 
 	// TTS providers
 	tts       *TTSService
@@ -77,6 +78,11 @@ func NewPipeline(config *models.Config) *Pipeline {
 	// Initialize DeepSeek if API key is provided
 	if config.DeepSeekKey != "" {
 		p.deepseek = NewDeepSeekService(config.DeepSeekKey)
+	}
+
+	// Initialize Grok (xAI) if API key is provided
+	if config.GrokAPIKey != "" {
+		p.grok = NewGrokTranslationService(config.GrokAPIKey)
 	}
 
 	// Initialize OpenAI TTS if selected and API key available
@@ -337,6 +343,19 @@ func (p *Pipeline) ProcessWithCallback(job *models.TranslationJob, onProgress Pr
 			func(current, total int) {
 				percent := config.ProgressTranslateStart + (current*translateRange)/total
 				msg := fmt.Sprintf("GPT-4o-mini: %d/%d segments", current, total)
+				reportProgress("Translating", percent, msg)
+			},
+		)
+
+	case "grok":
+		reportProgress("Translating", config.ProgressTranslateStart+1, "Using Grok (xAI)...")
+		translatedSubs, err = p.grok.TranslateSubtitles(
+			subtitles,
+			job.SourceLang,
+			job.TargetLang,
+			func(current, total int) {
+				percent := config.ProgressTranslateStart + (current*translateRange)/total
+				msg := fmt.Sprintf("Grok: %d/%d segments", current, total)
 				reportProgress("Translating", percent, msg)
 			},
 		)

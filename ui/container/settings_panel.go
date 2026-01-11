@@ -13,7 +13,6 @@ import (
 
 	"video-translator/models"
 	"video-translator/services"
-	"video-translator/ui/widgets"
 )
 
 // SettingsPanel displays settings as an inline page
@@ -35,6 +34,7 @@ type SettingsPanel struct {
 	openAIKeyEntry            *widget.Entry
 	deepSeekKeyEntry          *widget.Entry
 	groqAPIKeyEntry           *widget.Entry
+	grokAPIKeyEntry           *widget.Entry
 
 	// Audio mixing controls
 	keepBackgroundAudioCheck *widget.Check
@@ -71,7 +71,16 @@ func (p *SettingsPanel) SetConfig(config *models.Config) {
 
 // Build creates the panel UI
 func (p *SettingsPanel) Build() fyne.CanvasObject {
-	header := widgets.NewSectionHeader("Settings")
+	// Header with title and save button
+	titleLabel := widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	saveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+		p.saveSettings()
+	})
+	headerRow := container.NewBorder(nil, nil, titleLabel, saveBtn)
+	header := container.NewVBox(
+		container.NewPadded(headerRow),
+		widget.NewSeparator(),
+	)
 
 	// Output directory
 	p.outputDirEntry = widget.NewEntry()
@@ -103,6 +112,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		"argos",
 		"openai",
 		"deepseek",
+		"grok",
 	}, nil)
 	p.translationSelect.SetSelected(getOrDefault(p.config.TranslationProvider, "argos"))
 
@@ -248,6 +258,10 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 	p.groqAPIKeyEntry.SetPlaceHolder("gsk_...")
 	p.groqAPIKeyEntry.SetText(p.config.GroqAPIKey)
 
+	p.grokAPIKeyEntry = widget.NewPasswordEntry()
+	p.grokAPIKeyEntry.SetPlaceHolder("xai-...")
+	p.grokAPIKeyEntry.SetText(p.config.GrokAPIKey)
+
 	// Audio mixing controls
 	p.keepBackgroundAudioCheck = widget.NewCheck("Keep background audio/music", nil)
 	p.keepBackgroundAudioCheck.SetChecked(p.config.KeepBackgroundAudio)
@@ -280,6 +294,7 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		widget.NewFormItem("OpenAI API Key", p.openAIKeyEntry),
 		widget.NewFormItem("DeepSeek API Key", p.deepSeekKeyEntry),
 		widget.NewFormItem("Groq API Key", p.groqAPIKeyEntry),
+		widget.NewFormItem("Grok API Key (xAI)", p.grokAPIKeyEntry),
 	)
 
 	audioMixingForm := container.NewVBox(
@@ -287,12 +302,6 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		p.backgroundVolumeLabel,
 		p.backgroundVolumeSlider,
 	)
-
-	// Save button
-	saveBtn := widget.NewButtonWithIcon("Save Settings", theme.DocumentSaveIcon(), func() {
-		p.saveSettings()
-	})
-	saveBtn.Importance = widget.HighImportance
 
 	// Initialize conditional visibility
 	p.updateConditionalUI()
@@ -316,8 +325,6 @@ func (p *SettingsPanel) Build() fyne.CanvasObject {
 		widget.NewSeparator(),
 		widget.NewLabel("Cost Estimate (per 5hr video)"),
 		container.NewPadded(costInfo),
-		widget.NewSeparator(),
-		container.NewHBox(saveBtn),
 	)
 
 	scrollable := container.NewVScroll(content)
@@ -443,6 +450,7 @@ func (p *SettingsPanel) saveSettings() {
 	p.config.OpenAIKey = p.openAIKeyEntry.Text
 	p.config.DeepSeekKey = p.deepSeekKeyEntry.Text
 	p.config.GroqAPIKey = p.groqAPIKeyEntry.Text
+	p.config.GrokAPIKey = p.grokAPIKeyEntry.Text
 
 	p.config.KeepBackgroundAudio = p.keepBackgroundAudioCheck.Checked
 	p.config.BackgroundAudioVolume = p.backgroundVolumeSlider.Value / 100.0
@@ -454,7 +462,10 @@ func (p *SettingsPanel) saveSettings() {
 		return
 	}
 
-	dialog.ShowInformation("Settings", "Settings saved successfully!", p.window)
+	// Custom dialog without oversized icon
+	content := widget.NewLabel("Settings saved successfully!")
+	d := dialog.NewCustom("Settings", "OK", content, p.window)
+	d.Show()
 
 	if p.OnSave != nil {
 		p.OnSave(p.config)
@@ -491,6 +502,9 @@ func (p *SettingsPanel) getCostEstimate() string {
 	case "openai":
 		translateCostNum = 0.05
 		translateCost = "~$0.05"
+	case "grok":
+		translateCostNum = 0.02
+		translateCost = "~$0.02 (xAI)"
 	default:
 		translateCostNum = 0
 		translateCost = "Free (local)"

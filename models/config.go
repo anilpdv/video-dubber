@@ -39,6 +39,9 @@ type Config struct {
 	// Groq API settings (ultra-fast transcription using LPU hardware)
 	GroqAPIKey string `json:"groq_api_key"`
 
+	// Grok API settings (xAI's Grok for translation - cheap)
+	GrokAPIKey string `json:"grok_api_key"`
+
 	// Whisper settings (for whisper-cpp)
 	WhisperModel string `json:"whisper_model"`
 
@@ -172,5 +175,5 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	return os.WriteFile(configPath, data, 0644)
+	return os.WriteFile(configPath, data, 0600) // User-only permissions for security
 }
